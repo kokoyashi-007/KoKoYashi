@@ -2,3 +2,4 @@ streamlit
 pandas
 numpy
 janome
+google-generativeai
