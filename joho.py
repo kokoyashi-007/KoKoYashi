@@ -2,48 +2,40 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import time
-# 自然言語処理ライブラリ Janome (形態素解析器)
 from janome.tokenizer import Tokenizer
 import os
 import re
-# JavaScript埋め込み用
 import streamlit.components.v1 as components
-# 数学関数（コサイン減衰などで使用）
 import math
-# HTMLエスケープ用（セキュリティ対策）
 import html
-# Gemini API用
 import google.generativeai as genai
 import json
 
 # =========================================================
 # 0. アプリケーション設定 & CSS (UIデザイン)
 # =========================================================
-# ページ設定: タイトルとレイアウト（wideモードで横幅を有効活用）
 st.set_page_config(page_title="CineLog - 映画分析", layout="wide")
 
-# CSSによるスタイリング
-# Streamlitの標準スタイルを上書きし、洗練されたデザインにします。
 st.markdown("""
 <style>
-    /* ベースフォント設定: 視認性の高いゴシック体を優先指定 */
+    /* ベースフォント設定 */
     body {
         font-family: "Helvetica Neue", Arial, "Hiragino Kaku Gothic ProN", "Hiragino Sans", Meiryo, sans-serif;
         background-color: #FAFAFA; color: #333;
     }
-    /* アプリタイトル: グラデーションでモダンな印象に */
+    /* アプリタイトル */
     h1 {
         background: linear-gradient(45deg, #FF4B4B, #FF914D);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent;
         font-weight: 800; letter-spacing: -1px; margin-bottom: 0.5rem;
     }
-    /* タイマー表示: 等幅フォントでデジタル時計風に */
+    /* タイマー表示 */
     [data-testid="stMetricValue"] {
         font-family: 'Courier New', Courier, monospace;
         font-weight: bold; font-size: 3rem !important;
         color: #444; text-shadow: 2px 2px 0px rgba(0,0,0,0.1);
     }
-    /* ボタン: ホバー時の浮き上がりアニメーション */
+    /* ボタン装飾 */
     .stButton > button {
         border-radius: 12px; font-weight: 600; border: none;
         box-shadow: 0 4px 6px rgba(0,0,0,0.05);
@@ -56,7 +48,7 @@ st.markdown("""
     .stButton > button[kind="primary"] {
         background: linear-gradient(135deg, #FF4B4B 0%, #FF6B6B 100%); border: none;
     }
-    /* テキストエリア: 白背景固定・フォーカス時のアクセントカラー */
+    /* テキストエリア */
     .stTextArea textarea {
         border-radius: 12px; border: 1px solid #E0E0E0;
         background-color: #FFF !important; color: #333 !important;
@@ -66,7 +58,7 @@ st.markdown("""
     .stTextArea textarea:focus {
         border-color: #FF4B4B; box-shadow: 0 0 0 3px rgba(255, 75, 75, 0.15);
     }
-    /* タイムライン（鑑賞ログ）用スタイル */
+    /* タイムライン */
     .timeline-container { position: relative; padding: 20px 0; }
     .timeline-container::before { content: ''; position: absolute; top: 0; bottom: 0; left: 80px; width: 2px; background: #E0E0E0; }
     .timeline-item { position: relative; margin-bottom: 24px; display: flex; align-items: flex-start; }
@@ -114,6 +106,12 @@ if 'gemini_api_key' not in st.session_state: st.session_state.gemini_api_key = "
 if 'chat_history' not in st.session_state: st.session_state.chat_history = []
 if 'chat_initialized' not in st.session_state: st.session_state.chat_initialized = False
 if 'chat_mode' not in st.session_state: st.session_state.chat_mode = "詳細分析"
+
+# 【修正】関数定義の場所を前方に配置してNameErrorを回避
+def reset_chat():
+    """チャット履歴をリセットする関数"""
+    st.session_state.chat_history = []
+    st.session_state.chat_initialized = False
 
 
 # =========================================================
@@ -269,7 +267,112 @@ def analyze_sentiment_advanced(text):
 
 
 # =========================================================
-# 4. ヘルパー関数
+# 4. 感想戦（チャット）機能
+# =========================================================
+
+KNOWLEDGE_DETAILED = """
+【詳細分析モード：物語構造の深堀り】
+以下の14の視点に基づき、ユーザーのメモから関連する要素を深く掘り下げてください。
+1. プロットの核（一言でいうと？）
+2. 主人公：欠落・象徴（冒頭で何が欠けていたか）
+3. 主人公の現在位置（運命自覚前、成功、低迷、失敗のどれか。なければ無いで良し。）
+4. 主人公の過去（現在を形作ったもの）
+5. クエストと目的（具体的なミッションは何か）
+6. 象徴的に得る（or 失う）もの
+7. 敵対者（アンタゴニスト：価値観の違い）
+8. 協力者（味方：なぜ助けるのか）
+9. 日常世界（冒頭の環境と迫る危機）
+10. 変化を促す存在（使者、依頼者）
+11. 旅の最深部（日常から最も遠い場所での試練）
+12. 喪失（目的達成の代償）
+13. 敵対者との最終局面（対峙、理解、和解あるいは決裂）
+14. 結末（環境の変化、欠落は埋まったか）
+"""
+
+KNOWLEDGE_SIMPLE = """
+【簡易分析モード：物語の骨格把握】
+以下の3つの主要点に絞って、物語の全体像を整理する手助けをしてください。
+1. 物語の核（結局、誰が何をする話だったのか）
+2. 主人公の目的と動機（何のために戦っていたのか）
+3. 結末と変化（最初と最後で何が変わったか）
+"""
+
+def init_chat_with_analysis(df_notes):
+    api_key = st.session_state.gemini_api_key
+    if not api_key:
+        st.session_state.chat_history.append({"role": "assistant", "content": "分析お疲れ様でした！APIキーを設定すると、AIとの感想戦ができます。"})
+        return
+
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        logs_text = ""
+        for _, row in df_notes.iterrows():
+            logs_text += f"- {row['display_time']} [{row['category']}]: {row['content']} (感情値:{row['sentiment']:.2f})\n"
+
+        mode = st.session_state.chat_mode
+        knowledge = KNOWLEDGE_DETAILED if mode == "詳細分析" else KNOWLEDGE_SIMPLE
+
+        prompt = f"""
+        あなたは映画分析のプロフェッショナルメンターです。
+        ユーザーの鑑賞ログをもとに、選択されたモード「{mode}」に従って深掘り質問をしてください。
+
+        【知識ベース】
+        {knowledge}
+
+        【鑑賞ログ】
+        {logs_text}
+
+        【指示】
+        1. ログの中で感情値が高いシーンや見返しマークがある箇所に着目してください。
+        2. 知識ベースの中から、そのシーンに関連する問いを選んで質問してください。（一度に聞くのは1つか2つまで）
+        3. 語り口は丁寧かつフレンドリーな映画好きのトーンで。
+        4. 質問の後に、必ず【現時点でのストーリー骨格】というセクションを設け、これまでの情報から推測される物語の構造を箇条書きで要約してください。（初回なので推測で構いません）
+        """
+        response = model.generate_content(prompt)
+        st.session_state.chat_history.append({"role": "assistant", "content": response.text.strip()})
+        st.session_state.chat_initialized = True
+    except Exception as e:
+        st.session_state.chat_history.append({"role": "assistant", "content": f"AI接続エラー: {str(e)}"})
+
+def process_chat_input(user_input):
+    api_key = st.session_state.gemini_api_key
+    if not api_key: return
+    st.session_state.chat_history.append({"role": "user", "content": user_input})
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        history_text = ""
+        for chat in st.session_state.chat_history:
+            role = "User" if chat["role"] == "user" else "Mentor"
+            history_text += f"{role}: {chat['content']}\n"
+        
+        mode = st.session_state.chat_mode
+        knowledge = KNOWLEDGE_DETAILED if mode == "詳細分析" else KNOWLEDGE_SIMPLE
+
+        prompt = f"""
+        あなたは映画分析メンターです。以下の会話履歴と知識ベースをもとに、対話を続けてください。
+        モード: {mode}
+        
+        【知識ベース】
+        {knowledge}
+        
+        【会話履歴】
+        {history_text}
+        
+        【指示】
+        - ユーザーの回答を受け止め、肯定・補足してください。
+        - 次の視点に移るべきであれば、知識ベースから別の問いを提示してください。
+        - 回答の最後に必ず【現時点でのストーリー骨格】というセクションを設け、これまでの会話内容を反映して物語の構造要約を更新・出力してください。
+        - 150〜300文字程度で返してください（骨格部分は除く）。
+        """
+        response = model.generate_content(prompt)
+        st.session_state.chat_history.append({"role": "assistant", "content": response.text.strip()})
+    except Exception as e: st.error(f"Error: {e}")
+
+
+# =========================================================
+# 5. ヘルパー関数
 # =========================================================
 
 def get_current_elapsed_time():
@@ -314,7 +417,6 @@ def calculate_decay_curve(df_notes, duration):
             else: decay_scores[t] = 0.0
     return pd.DataFrame({'timestamp': time_index, 'sentiment': decay_scores})
 
-# HTML生成関数（色分け対応）
 def generate_html_report(df, movie_title, characters=[]):
     char_html = ""
     if characters:
@@ -322,32 +424,15 @@ def generate_html_report(df, movie_title, characters=[]):
         for char in characters:
             char_items += f"""<div style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px dashed #eee;display:flex;align-items:center;"><div style="background:#f0f2f6;width:36px;height:36px;border-radius:50%;display:flex;justify-content:center;align-items:center;margin-right:12px;font-size:1.2rem;">👤</div><div><div style="font-weight:bold;color:#2c3e50;font-size:1.05em;">{html.escape(char['name'])}</div><div style="font-size:0.95em;color:#666;white-space:pre-wrap;margin-top:2px;">{html.escape(char['desc'])}</div></div></div>"""
         char_html = f"""<div style="background:white;padding:25px;margin-bottom:40px;border-radius:12px;box-shadow:0 4px 15px rgba(0,0,0,0.05);border:1px solid #eee;"><h3 style="color:#FF914D;border-bottom:2px solid #FF914D;padding-bottom:10px;margin-top:0;">👥 登場人物・組織</h3>{char_items}</div>"""
-
-    html_content = f"""<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><title>{html.escape(movie_title)} - Log</title><style>body{{font-family:sans-serif;max-width:800px;margin:0 auto;padding:40px 20px;background:#f8f9fa;color:#333}}h1{{border-bottom:4px solid #FF4B4B;padding-bottom:15px;margin-bottom:40px}}.timeline{{position:relative;padding-left:40px}}.timeline::before{{content:'';position:absolute;left:10px;top:0;bottom:0;width:2px;background:#e9ecef}} 
-    /* カードスタイル（色分け） */
-    .note-card {{ background:white;border-radius:12px;padding:20px;margin-bottom:25px;border-left:6px solid #ccc;box-shadow:0 4px 15px rgba(0,0,0,0.05); }}
-    .note-card.pos {{ border-left-color: #FF914D; background-color: #fffaf0; }}
-    .note-card.neg {{ border-left-color: #4D91FF; background-color: #f0f8ff; }}
-    .note-card.mark {{ border-left-color: #FFD700; background-color: #fffdf0; }}
-    
-    .meta{{display:flex;justify-content:space-between;margin-bottom:10px;border-bottom:1px solid rgba(0,0,0,0.05);padding-bottom:5px}}.time{{font-weight:bold;color:#666}}.category{{background:rgba(0,0,0,0.05);padding:2px 10px;border-radius:12px;font-size:0.8em}}.sentiment{{text-align:right;color:#999;font-size:0.9em}}
-    .s-pos {{ color: #FF914D; font-weight:bold; }} .s-neg {{ color: #4D91FF; font-weight:bold; }}
-    </style></head><body><h1>🎬 {html.escape(movie_title)}</h1>{char_html}<div class="timeline">"""
-    
+    html_content = f"""<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><title>{html.escape(movie_title)} - Log</title><style>body{{font-family:sans-serif;max-width:800px;margin:0 auto;padding:40px 20px;background:#f8f9fa;color:#333}}h1{{border-bottom:4px solid #FF4B4B;padding-bottom:15px;margin-bottom:40px}}.timeline{{position:relative;padding-left:40px}}.timeline::before{{content:'';position:absolute;left:10px;top:0;bottom:0;width:2px;background:#e9ecef}}.note-card{{background:white;border-radius:12px;padding:20px;margin-bottom:25px;border-left:6px solid #ccc;box-shadow:0 4px 15px rgba(0,0,0,0.05)}}.note-card.pos{{border-left-color:#FF914D;background-color:#fffaf0}}.note-card.neg{{border-left-color:#4D91FF;background-color:#f0f8ff}}.note-card.mark{{border-left-color:#FFD700;background-color:#fffdf0}}.meta{{display:flex;justify-content:space-between;margin-bottom:10px;border-bottom:1px solid rgba(0,0,0,0.05);padding-bottom:5px}}.time{{font-weight:bold;color:#666}}.category{{background:rgba(0,0,0,0.05);padding:2px 10px;border-radius:12px;font-size:0.8em}}.sentiment{{text-align:right;color:#999;font-size:0.9em}}.s-pos{{color:#FF914D;font-weight:bold}}.s-neg{{color:#4D91FF;font-weight:bold}}</style></head><body><h1>🎬 {html.escape(movie_title)}</h1>{char_html}<div class="timeline">"""
     for index, row in df.iterrows():
         score = row['sentiment']
         is_mark = row['category'] in ["見返しマーク", "クイック反応"]
-        
-        # クラス決定
         cls = "note-card"
         s_cls = ""
-        if is_mark and row['category'] == "見返しマーク":
-            cls += " mark"
-        elif score >= 0.1:
-            cls += " pos"; s_cls = "s-pos"
-        elif score <= -0.1:
-            cls += " neg"; s_cls = "s-neg"
-            
+        if is_mark and row['category'] == "見返しマーク": cls += " mark"
+        elif score >= 0.1: cls += " pos"; s_cls = "s-pos"
+        elif score <= -0.1: cls += " neg"; s_cls = "s-neg"
         s_txt = f"<span class='{s_cls}'>Score: {score:+.2f}</span>" if not is_mark else "-"
         safe_content = html.escape(row['content'])
         html_content += f"""<div class="{cls}"><div class="meta"><span class="time">{row['display_time']}</span><span class="category">{row['category']}</span></div><div class="content">{safe_content}</div><div class="sentiment">{s_txt}</div></div>"""
@@ -371,68 +456,6 @@ def generate_analysis_process_report(df, movie_title):
         html_content += f"""<div class="card"><h3>{row['display_time']} {row['category']}</h3><p>{html.escape(row['content'])}</p><div>{chips_html}</div></div>"""
     html_content += "</body></html>"
     return html_content
-
-
-# =========================================================
-# 4. 感想戦（チャット）機能
-# =========================================================
-
-KNOWLEDGE_DETAILED = """【詳細分析モード：物語構造の深堀り】...（省略）...14. 結末（環境の変化、欠落は埋まったか）"""
-KNOWLEDGE_SIMPLE = """【簡易分析モード：物語の骨格把握】...（省略）...3. 結末と変化（最初と最後で何が変わったか）"""
-
-def init_chat_with_analysis(df_notes):
-    api_key = st.session_state.gemini_api_key
-    if not api_key:
-        st.session_state.chat_history.append({"role": "assistant", "content": "分析お疲れ様でした！APIキーを設定すると、AIとの感想戦ができます。"})
-        return
-
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        logs_text = ""
-        for _, row in df_notes.iterrows():
-            logs_text += f"- {row['display_time']} [{row['category']}]: {row['content']} (感情値:{row['sentiment']:.2f})\n"
-
-        mode = st.session_state.chat_mode
-        knowledge = KNOWLEDGE_DETAILED if mode == "詳細分析" else KNOWLEDGE_SIMPLE
-
-        prompt = f"""
-        あなたは映画分析のプロフェッショナルメンターです。ユーザーの鑑賞ログをもとに、選択されたモード「{mode}」に従って深掘り質問をしてください。
-        【知識ベース】{knowledge}
-        【鑑賞ログ】{logs_text}
-        【指示】1. ログの中で感情値が高いシーンや見返しマークがある箇所に着目してください。 2. 知識ベースの中から、そのシーンに関連する問いを選んで質問してください。（一度に聞くのは1つか2つまで） 3. 語り口は丁寧かつフレンドリーな映画好きのトーンで。 4. 質問の後に、必ず【現時点でのストーリー骨格】というセクションを設け、これまでの情報から推測される物語の構造を箇条書きで要約してください。（初回なので推測で構いません）
-        """
-        response = model.generate_content(prompt)
-        st.session_state.chat_history.append({"role": "assistant", "content": response.text.strip()})
-        st.session_state.chat_initialized = True
-    except Exception as e:
-        st.session_state.chat_history.append({"role": "assistant", "content": f"AI接続エラー: {str(e)}"})
-
-def process_chat_input(user_input):
-    api_key = st.session_state.gemini_api_key
-    if not api_key: return
-    st.session_state.chat_history.append({"role": "user", "content": user_input})
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        history_text = ""
-        for chat in st.session_state.chat_history:
-            role = "User" if chat["role"] == "user" else "Mentor"
-            history_text += f"{role}: {chat['content']}\n"
-        
-        mode = st.session_state.chat_mode
-        knowledge = KNOWLEDGE_DETAILED if mode == "詳細分析" else KNOWLEDGE_SIMPLE
-
-        prompt = f"""
-        あなたは映画分析メンターです。以下の会話履歴と知識ベースをもとに、対話を続けてください。
-        モード: {mode}
-        【知識ベース】{knowledge}
-        【会話履歴】{history_text}
-        【指示】ユーザーの回答を受け止め、肯定・補足してください。次の視点に移るべきであれば、知識ベースから別の問いを提示してください。回答の最後に必ず【現時点でのストーリー骨格】というセクションを設け、これまでの会話内容を反映して物語の構造要約を更新・出力してください。150〜300文字程度で返してください（骨格部分は除く）。
-        """
-        response = model.generate_content(prompt)
-        st.session_state.chat_history.append({"role": "assistant", "content": response.text.strip()})
-    except Exception as e: st.error(f"Error: {e}")
 
 
 # =========================================================
@@ -466,6 +489,7 @@ with st.sidebar:
         st.session_state.gemini_api_key = api_key_input
         st.caption("✅ AI機能: 有効")
         st.markdown("##### 🗣️ 感想戦モード設定")
+        # モード選択
         new_mode = st.radio("深掘りの方向性", ["詳細分析", "簡易分析"], captions=["深く多角的に分析", "サクッと全体像を把握"], index=0 if st.session_state.chat_mode=="詳細分析" else 1)
         if new_mode != st.session_state.chat_mode:
             st.session_state.chat_mode = new_mode
@@ -489,28 +513,23 @@ with st.sidebar:
     if st.session_state.custom_categories:
         st.caption("現在のカスタム項目:"); [st.markdown(f"- {c}") for c in st.session_state.custom_categories]
     
-    # 🛠️ 開発者向け解説セクション
     st.divider()
     with st.expander("🛠️ このアプリの仕組み（開発者向け）"):
         st.markdown("""
-        **CineLog (シネログ) の技術スタックとロジック**
+        **CineLog 技術解説**
+        Python + Streamlit で構築された映画分析ツールです。
         
-        このアプリは Python の `Streamlit` フレームワークで構築されています。
+        **感情分析ロジック (Hybrid NLP)**
+        1. **形態素解析**: `Janome` でテキストを単語分解。
+        2. **ルールベース判定**:
+           - `pn_ja.dic` (極性辞書) で単語スコアを取得。
+           - **逆接ブースト**: 「しかし」等の後の文章を重要視 (×1.5)。
+           - **連語処理**: 「値段が高い(-1)」等の複合語を判定。
+           - **否定反転**: 「面白くない」等の否定語を検知しスコア反転。
+        3. **AI補正**: Gemini API (もし有効なら) で文脈を考慮したスコア修正。
         
-        **1. 感情分析エンジン (Hybrid NLP)**
-        - **形態素解析**: `Janome` を使用して日本語テキストを単語に分解。
-        - **辞書ベース判定**: `pn_ja.dic` (極性辞書) を使用し、単語ごとのスコアを取得。
-        - **文脈補正**:
-            - **逆接ブースト**: 「しかし」等の後の文章の重みを1.5倍に。
-            - **連語処理**: 「値段が高い(-1)」のような組み合わせを判定。
-            - **否定反転**: 「面白くない」のように否定語が続くとスコアを反転。
-        - **AI補正 (Optional)**: Gemini API を使用し、文脈（皮肉など）を考慮してスコアを修正。
-        
-        **2. 感情曲線の描画**
-        - **減衰ロジック**: 感情は発生した瞬間がピークで、時間とともに冷めるものとして、`cos` カーブを用いて減衰させています（持続時間60秒）。
-        
-        **3. データ管理**
-        - `st.session_state` を使用して、再レンダリングされてもストップウォッチやメモの内容を保持しています。
+        **可視化**
+        - **減衰曲線**: 感情は発生後、時間(60秒)とともに0に戻る `cos` カーブで描画。
         """)
 
 st.title("🎬 CineLog")
@@ -544,7 +563,7 @@ with col4:
 
 
 # =========================================================
-# 7. 入力エリア
+# 7. 入力エリア & JSキーボード操作
 # =========================================================
 if st.session_state.status in ['playing', 'paused']:
     st.divider()
@@ -658,6 +677,10 @@ if st.session_state.status == 'finished':
         if prompt := st.chat_input("AIに返信して分析を深める..."):
             process_chat_input(prompt)
             st.rerun()
+    else:
+         if st.session_state.get('gemini_api_key') == "":
+             st.divider()
+             st.info("※ APIキーを設定すると、AIとの感想戦チャット機能が表示されます。")
 
     st.write("")
     if st.button("新しい分析を始める", use_container_width=True):
