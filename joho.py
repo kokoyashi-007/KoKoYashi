@@ -13,7 +13,7 @@ from janome.tokenizer import Tokenizer
 # =========================================================
 # 0. アプリケーション設定 & CSS
 # =========================================================
-st.set_page_config(page_title="CineLog AI ", layout="wide")
+st.set_page_config(page_title="CineLog AI - Structural Analysis", layout="wide")
 
 st.markdown("""
 <style>
@@ -85,47 +85,86 @@ def get_tokenizer():
 
 @st.cache_resource
 def load_sentiment_dictionary():
-    """複数の辞書ファイルを読み込んで統合する"""
-    dict_files = [
-        {'name': 'pn_ja.dic', 'enc': 'shift-jis', 'sep': ':', 'cols': [0, 3]},
-        {'name': 'wago.121808.pn', 'enc': 'utf-8', 'sep': '\t', 'cols': [1, 0]},
-        {'name': 'pn.csv.m3.120408.trim', 'enc': 'utf-8', 'sep': '\t', 'cols': [0, 1]}
-    ]
-    
+    """
+    3種類の辞書ファイルを読み込んで統合する
+    1. pn_ja.dic (標準極性辞書)
+    2. wago.121808.pn (用言編: ラベル形式)
+    3. pn.csv.m3.120408.trim (名詞編: p/n/eタグ)
+    """
     dic_data = {}
     loaded_files = []
     
-    for d in dict_files:
-        path = d['name']
-        if not os.path.exists(path):
-            path = os.path.join('dic', d['name'])
-        
-        if os.path.exists(path):
-            try:
-                df = pd.read_csv(path, encoding=d['enc'], sep=d['sep'], header=None, on_bad_lines='skip')
-                term_col = d['cols'][0]
-                score_col = d['cols'][1]
-                
-                if len(df.columns) > max(term_col, score_col):
-                    for _, row in df.iterrows():
-                        term = str(row[term_col]).strip()
-                        val = row[score_col]
-                        score = 0.0
-                        if isinstance(val, (int, float)):
-                            score = float(val)
-                        elif isinstance(val, str):
-                            val = val.lower().strip()
-                            if val in ['p', 'pos', 'positive']: score = 1.0
-                            elif val in ['n', 'neg', 'negative']: score = -1.0
-                            elif val in ['e', 'neu', 'neutral']: score = 0.0
-                            else:
-                                try: score = float(val)
-                                except: pass
-                        dic_data[term] = score
-                    loaded_files.append(d['name'])
-            except Exception as e:
-                pass
+    # -------------------------------------------------
+    # 1. pn_ja.dic (標準)
+    # -------------------------------------------------
+    path_std = 'pn_ja.dic'
+    if not os.path.exists(path_std): path_std = os.path.join('dic', 'pn_ja.dic')
+    
+    if os.path.exists(path_std):
+        try:
+            df = pd.read_csv(path_std, encoding='shift-jis', sep=':', header=None, names=['term', 'kana', 'pos', 'score'])
+            for _, row in df.iterrows():
+                dic_data[str(row['term']).strip()] = float(row['score'])
+            loaded_files.append('pn_ja.dic')
+        except Exception as e:
+            print(f"Error loading pn_ja.dic: {e}")
 
+    # -------------------------------------------------
+    # 2. wago.121808.pn (用言編)
+    # フォーマット: ラベル(Tab)単語  例: ネガ（評価）\t遽しい
+    # -------------------------------------------------
+    path_wago = 'wago.121808.pn'
+    if not os.path.exists(path_wago): path_wago = os.path.join('dic', 'wago.121808.pn')
+    
+    if os.path.exists(path_wago):
+        try:
+            # 形式が特殊なので行ごとに処理
+            with open(path_wago, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 2:
+                        label = parts[0] # ネガ（評価）
+                        term = parts[1].strip() # 遽しい
+                        
+                        score = 0.0
+                        if 'ポジ' in label: score = 1.0
+                        elif 'ネガ' in label: score = -1.0
+                        
+                        if score != 0.0:
+                            # 既存の辞書より優先するか、なければ追加
+                            dic_data[term] = score
+            loaded_files.append('wago.121808.pn')
+        except Exception as e:
+            print(f"Error loading wago dictionary: {e}")
+
+    # -------------------------------------------------
+    # 3. pn.csv.m3.120408.trim (名詞編)
+    # フォーマット: 単語(Tab)タグ(p/n/e)(Tab)カテゴリ
+    # -------------------------------------------------
+    path_noun = 'pn.csv.m3.120408.trim'
+    if not os.path.exists(path_noun): path_noun = os.path.join('dic', 'pn.csv.m3.120408.trim')
+    
+    if os.path.exists(path_noun):
+        try:
+            with open(path_noun, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 2:
+                        term = parts[0].strip()
+                        tag = parts[1].strip().lower() # p, n, e
+                        
+                        score = 0.0
+                        if tag == 'p': score = 1.0
+                        elif tag == 'n': score = -1.0
+                        # e (neutral) はスコア0.0として扱うか、登録しない
+                        # ここでは明確な極性があるもののみ上書きする
+                        if score != 0.0:
+                            dic_data[term] = score
+            loaded_files.append('pn.csv.m3.120408.trim')
+        except Exception as e:
+            print(f"Error loading noun dictionary: {e}")
+
+    # フォールバック
     if not dic_data:
         dic_data = {'良い': 1.0, '悪い': -1.0, '好き': 1.0, '嫌い': -1.0, '楽しい': 0.9, '退屈': -0.9}
         
@@ -150,6 +189,7 @@ def analyze_sentiment_advanced(text):
         pos = pos_part[0]
         sub_pos = pos_part[1] if len(pos_part) > 1 else ""
         
+        # 逆接チェック
         if (pos == '接続詞' and base_form in ADVERSATIVE_WORDS) or \
            (pos == '助詞' and sub_pos == '接続助詞' and base_form in ['が', 'けど', 'けれど', 'けれども']):
             current_boost = 1.5
@@ -160,6 +200,7 @@ def analyze_sentiment_advanced(text):
         reason = ""
         matched_term = base_form
         
+        # 連語ルール
         if pos in ['形容詞', '動詞', '名詞']:
             for j in range(1, 5):
                 if i - j >= 0:
@@ -171,12 +212,16 @@ def analyze_sentiment_advanced(text):
                         reason = "連語"
                         break
         
+        # 辞書マッチ (統合辞書を使用)
         if not found_sentiment and base_form in SENTIMENT_DICT:
-            if pos in ['名詞', '動詞', '形容詞', '副詞', '連体詞']:
+            # 助詞や助動詞が単体でヒットするのを防ぐ（"の"などが辞書にある場合）
+            # ただし、wago辞書には「〜だ」などが含まれるため、柔軟に対応
+            if pos in ['名詞', '動詞', '形容詞', '副詞', '連体詞', '感動詞']:
                 current_score = float(SENTIMENT_DICT[base_form])
                 found_sentiment = True
                 reason = "辞書"
         
+        # 否定語チェック
         if found_sentiment:
             negated = False
             neg_term = ""
@@ -202,7 +247,7 @@ def analyze_sentiment_advanced(text):
     return max(-1.0, min(1.0, final_score)), calc_log
 
 # =========================================================
-# 2. ステート & AI知識ベース
+# 2. ステート & AI知識ベース (名詞・用言基準の追加)
 # =========================================================
 
 if 'status' not in st.session_state: st.session_state.status = 'ready'
@@ -222,29 +267,33 @@ KNOWLEDGE_STRUCTURE = """
 ■ 1. マクロ構造フレームワーク
 * **三幕構成**: 設定(Act1) → 対立(Act2) → 解決(Act3)
 * **起承転結**: 導入(起) → 展開(承) → 飛躍・逆転(転) → 結末(結)
-* **行って帰る**: 「日常」から「非日常」への境界を超え、試練を経て変化し、再び「日常」へ帰還する円環構造。
+* **行って帰る**: 日常から非日常への境界越え→試練と変化→日常への帰還。
 
 ■ 2. 物語の内容モデル (状態変化 S1 → M → S2)
-物語のミクロな連鎖は「初期状態(S1) → 手段(M) → 帰結状態(S2)」で定義される。
-* **初期状態 (S1)**: 主人公の困った状態（欠落）。
-* **手段・方法 (M)**: S1から脱するためにとる行動。
-* **帰結状態 (S2)**: 行動の結果至った状態。
+物語のミクロな連鎖:「初期状態(S1) → 手段(M) → 帰結状態(S2)」
+* **重要パターン**: 
+    a. プラス→マイナス(転落) / b. マイナス→プラス(回復)
+    c. 無知→認識(発見) / d. 行為→評価
 
-**重視する変化パターン:**
-a. プラス → マイナス (転落)
-b. マイナス → プラス (回復)
-c. 義務・欲望 → 行為
-d. 無知 → 認識 (発見)
-e. 認識 → 現表行為
-f. 行為 → その評価
+■ 3. 表現の評価基準 (和語・名詞の極性判定)
+AIは文脈に応じて以下の基準で「真の感情値」を判断せよ。
 
-■ 3. 和語・表現の評価基準 (kijun.pdfに基づく)
-文脈分析において以下の基準を適用すること。
-* **経験 vs 評価**: 話し手自身の体験か、対象への客観評価かを区別する。
-* **受動態 (レル/ラレル) の解釈**: 
-    * **可能**: 能力や許容はポジティブ傾向。
-    * **恩恵受け身**: 「誘ってもらった」はポジティブ。
-    * **迷惑受け身**: 「荒らされた」はネガティブ。
+**(A) 用言・和語の判断基準 (経験 vs 評価)**
+* **経験(Experience)**: 話し手自身の体験。「けだるい」「あせる」。主観的実感を重視。
+* **評価(Evaluation)**: 対象への客観的描写。「あらい」「ぐちゃぐちゃ」。
+* **受動態(レル/ラレル)の文脈**: 
+    * **恩恵**: 「誘ってもらった」「出迎えられた」→ ポジティブ
+    * **迷惑/被害**: 「荒らされた」「食べられた」→ ネガティブ
+    * **可能**: 「飲める（許容・能力）」→ ポジティブ傾向
+
+**(B) 名詞の評価極性基準 (主観 vs 客観)**
+* **〜である・になる（評価・感情）主観**: 対象をどう評価しているか？(例: 誠実, 名手 vs 弱気, 鬱)
+* **〜である・になる（状態）客観**: その状態自体が良いか悪いか？(例: 合格者, 快晴 vs ガン)
+* **〜する（感情）主観**: その感情が良いか悪いか？(例: 感嘆 vs 失望)
+* **〜する（出来事）**: それが起きると嬉しいか嫌か？(例: 善戦, 成就 vs 病気)
+* **〜する（行為）**: その行為は賞賛されるか非難されるか？(例: 奮闘, 協力 vs 人殺し)
+* **〜がある・高まる（存在・性質）**: それが増えると良いか？(例: ご縁, 慈愛, オリジナリティ vs 菌, アクシデント)
+* **〜に行く（場所）**: そこにいると嬉しいか？(例: リゾート vs 監獄)
 
 ■ 4. 表現技法 (Discourse)
 * **没入**: 自己移入、感情移入。
@@ -300,7 +349,7 @@ def analyze_scene_with_ai(plot_text, emotion_text):
         
         【タスク】
         1. 辞書判定スコア({dict_score})を参考に、文脈を考慮して最終スコアを決定。
-           特に「kijun.pdf」基準にある「受動態の恩恵/迷惑」や「経験/評価」の区別に注意してください。
+           特に知識ベースの「和語・名詞の評価基準（経験vs評価、恩恵vs迷惑受け身）」を厳密に適用してください。
         2. あらすじ(Fact)から、知識ベースにある「変化パターン」「表現技法」「構造的位置」を分析。
         
         【★隠し評価ミッション】
@@ -473,7 +522,7 @@ with st.sidebar:
              if key in st.session_state: del st.session_state[key]
         st.rerun()
 
-st.title("🎬 CineLog ")
+st.title("🎬 CineLog AI - Structural Analysis")
 movie_title = st.text_input("作品名", placeholder="作品名を入力", label_visibility="collapsed")
 
 # プレイヤー制御
@@ -496,7 +545,7 @@ with c4:
 # 入力フォーム
 if st.session_state.status in ['playing', 'paused']:
     st.divider()
-    st.info("💡 **使い分け**: 📖 **Fact**は物語の構造分析に使われます💭 **Feeling**はあなたの心の動きのグラフ化に使われます " )
+    st.info("💡 **使い分け**: 💭 **感情(Feeling)**=あなたの心の動き(グラフ) / 📖 **あらすじ(Fact)**=物語の出来事(構造分析)")
     
     with st.form("log_form", clear_on_submit=True):
         c_plot, c_emo = st.columns(2)
