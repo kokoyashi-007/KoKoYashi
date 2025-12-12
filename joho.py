@@ -9,6 +9,7 @@ import html
 import json
 import google.generativeai as genai
 from janome.tokenizer import Tokenizer
+# セーフティ設定用のインポートは削除しました
 
 # =========================================================
 # 0. アプリケーション設定 & CSS
@@ -85,86 +86,47 @@ def get_tokenizer():
 
 @st.cache_resource
 def load_sentiment_dictionary():
-    """
-    3種類の辞書ファイルを読み込んで統合する
-    1. pn_ja.dic (標準極性辞書)
-    2. wago.121808.pn (用言編: ラベル形式)
-    3. pn.csv.m3.120408.trim (名詞編: p/n/eタグ)
-    """
+    """複数の辞書ファイルを読み込んで統合する"""
+    dict_files = [
+        {'name': 'pn_ja.dic', 'enc': 'shift-jis', 'sep': ':', 'cols': [0, 3]},
+        {'name': 'wago.121808.pn', 'enc': 'utf-8', 'sep': '\t', 'cols': [1, 0]},
+        {'name': 'pn.csv.m3.120408.trim', 'enc': 'utf-8', 'sep': '\t', 'cols': [0, 1]}
+    ]
+    
     dic_data = {}
     loaded_files = []
     
-    # -------------------------------------------------
-    # 1. pn_ja.dic (標準)
-    # -------------------------------------------------
-    path_std = 'pn_ja.dic'
-    if not os.path.exists(path_std): path_std = os.path.join('dic', 'pn_ja.dic')
-    
-    if os.path.exists(path_std):
-        try:
-            df = pd.read_csv(path_std, encoding='shift-jis', sep=':', header=None, names=['term', 'kana', 'pos', 'score'])
-            for _, row in df.iterrows():
-                dic_data[str(row['term']).strip()] = float(row['score'])
-            loaded_files.append('pn_ja.dic')
-        except Exception as e:
-            print(f"Error loading pn_ja.dic: {e}")
-
-    # -------------------------------------------------
-    # 2. wago.121808.pn (用言編)
-    # フォーマット: ラベル(Tab)単語  例: ネガ（評価）\t遽しい
-    # -------------------------------------------------
-    path_wago = 'wago.121808.pn'
-    if not os.path.exists(path_wago): path_wago = os.path.join('dic', 'wago.121808.pn')
-    
-    if os.path.exists(path_wago):
-        try:
-            # 形式が特殊なので行ごとに処理
-            with open(path_wago, 'r', encoding='utf-8') as f:
-                for line in f:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 2:
-                        label = parts[0] # ネガ（評価）
-                        term = parts[1].strip() # 遽しい
-                        
+    for d in dict_files:
+        path = d['name']
+        if not os.path.exists(path):
+            path = os.path.join('dic', d['name'])
+        
+        if os.path.exists(path):
+            try:
+                df = pd.read_csv(path, encoding=d['enc'], sep=d['sep'], header=None, on_bad_lines='skip')
+                term_col = d['cols'][0]
+                score_col = d['cols'][1]
+                
+                if len(df.columns) > max(term_col, score_col):
+                    for _, row in df.iterrows():
+                        term = str(row[term_col]).strip()
+                        val = row[score_col]
                         score = 0.0
-                        if 'ポジ' in label: score = 1.0
-                        elif 'ネガ' in label: score = -1.0
-                        
-                        if score != 0.0:
-                            # 既存の辞書より優先するか、なければ追加
-                            dic_data[term] = score
-            loaded_files.append('wago.121808.pn')
-        except Exception as e:
-            print(f"Error loading wago dictionary: {e}")
+                        if isinstance(val, (int, float)):
+                            score = float(val)
+                        elif isinstance(val, str):
+                            val = val.lower().strip()
+                            if val in ['p', 'pos', 'positive']: score = 1.0
+                            elif val in ['n', 'neg', 'negative']: score = -1.0
+                            elif val in ['e', 'neu', 'neutral']: score = 0.0
+                            else:
+                                try: score = float(val)
+                                except: pass
+                        dic_data[term] = score
+                    loaded_files.append(d['name'])
+            except Exception as e:
+                pass
 
-    # -------------------------------------------------
-    # 3. pn.csv.m3.120408.trim (名詞編)
-    # フォーマット: 単語(Tab)タグ(p/n/e)(Tab)カテゴリ
-    # -------------------------------------------------
-    path_noun = 'pn.csv.m3.120408.trim'
-    if not os.path.exists(path_noun): path_noun = os.path.join('dic', 'pn.csv.m3.120408.trim')
-    
-    if os.path.exists(path_noun):
-        try:
-            with open(path_noun, 'r', encoding='utf-8') as f:
-                for line in f:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 2:
-                        term = parts[0].strip()
-                        tag = parts[1].strip().lower() # p, n, e
-                        
-                        score = 0.0
-                        if tag == 'p': score = 1.0
-                        elif tag == 'n': score = -1.0
-                        # e (neutral) はスコア0.0として扱うか、登録しない
-                        # ここでは明確な極性があるもののみ上書きする
-                        if score != 0.0:
-                            dic_data[term] = score
-            loaded_files.append('pn.csv.m3.120408.trim')
-        except Exception as e:
-            print(f"Error loading noun dictionary: {e}")
-
-    # フォールバック
     if not dic_data:
         dic_data = {'良い': 1.0, '悪い': -1.0, '好き': 1.0, '嫌い': -1.0, '楽しい': 0.9, '退屈': -0.9}
         
@@ -189,7 +151,6 @@ def analyze_sentiment_advanced(text):
         pos = pos_part[0]
         sub_pos = pos_part[1] if len(pos_part) > 1 else ""
         
-        # 逆接チェック
         if (pos == '接続詞' and base_form in ADVERSATIVE_WORDS) or \
            (pos == '助詞' and sub_pos == '接続助詞' and base_form in ['が', 'けど', 'けれど', 'けれども']):
             current_boost = 1.5
@@ -200,7 +161,6 @@ def analyze_sentiment_advanced(text):
         reason = ""
         matched_term = base_form
         
-        # 連語ルール
         if pos in ['形容詞', '動詞', '名詞']:
             for j in range(1, 5):
                 if i - j >= 0:
@@ -212,16 +172,12 @@ def analyze_sentiment_advanced(text):
                         reason = "連語"
                         break
         
-        # 辞書マッチ (統合辞書を使用)
         if not found_sentiment and base_form in SENTIMENT_DICT:
-            # 助詞や助動詞が単体でヒットするのを防ぐ（"の"などが辞書にある場合）
-            # ただし、wago辞書には「〜だ」などが含まれるため、柔軟に対応
             if pos in ['名詞', '動詞', '形容詞', '副詞', '連体詞', '感動詞']:
                 current_score = float(SENTIMENT_DICT[base_form])
                 found_sentiment = True
                 reason = "辞書"
         
-        # 否定語チェック
         if found_sentiment:
             negated = False
             neg_term = ""
@@ -247,7 +203,7 @@ def analyze_sentiment_advanced(text):
     return max(-1.0, min(1.0, final_score)), calc_log
 
 # =========================================================
-# 2. ステート & AI知識ベース (名詞・用言基準の追加)
+# 2. ステート & AI知識ベース
 # =========================================================
 
 if 'status' not in st.session_state: st.session_state.status = 'ready'
@@ -322,8 +278,34 @@ WALL_PARTNER_PROMPT = f"""
 """
 
 # =========================================================
-# 3. 分析・ヘルパー関数
+# 3. 分析・ヘルパー関数 (Retry機能追加版)
 # =========================================================
+
+def generate_with_retry(model, contents, config=None):
+    """API呼び出しのリトライ処理を行うヘルパー関数"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            if config:
+                return model.generate_content(contents, generation_config=config)
+            else:
+                return model.generate_content(contents)
+        except Exception as e:
+            err_msg = str(e)
+            if "429" in err_msg:
+                # 429エラー(制限超過)の場合のみリトライ
+                if attempt < max_retries - 1:
+                    # エラーメッセージから待機時間を抽出、なければ指数バックオフ
+                    wait_time = 5 * (2 ** attempt)
+                    match = re.search(r"retry in (\d+(\.\d+)?)s", err_msg)
+                    if match:
+                        wait_time = float(match.group(1)) + 2.0 # バッファ追加
+                    
+                    # ユーザーに通知せずに待機
+                    time.sleep(wait_time)
+                    continue
+            # 429以外のエラー、またはリトライ上限に達した場合は例外を投げる
+            raise e
 
 def analyze_scene_with_ai(plot_text, emotion_text):
     dict_score, calc_log = analyze_sentiment_advanced(emotion_text)
@@ -341,7 +323,7 @@ def analyze_scene_with_ai(plot_text, emotion_text):
 
     try:
         genai.configure(api_key=api_key)
-        # モデル名: gemini-2.0-flash
+        # モデル名: gemini-2.0-flash (ユーザー指定)
         model = genai.GenerativeModel('gemini-2.0-flash')
         
         prompt = f"""
@@ -349,7 +331,7 @@ def analyze_scene_with_ai(plot_text, emotion_text):
         
         【タスク】
         1. 辞書判定スコア({dict_score})を参考に、文脈を考慮して最終スコアを決定。
-           特に知識ベースの「和語・名詞の評価基準（経験vs評価、恩恵vs迷惑受け身）」を厳密に適用してください。
+           特に「kijun.pdf」基準にある「受動態の恩恵/迷惑」や「経験/評価」の区別に注意してください。
         2. あらすじ(Fact)から、知識ベースにある「変化パターン」「表現技法」「構造的位置」を分析。
         
         【★隠し評価ミッション】
@@ -371,19 +353,33 @@ def analyze_scene_with_ai(plot_text, emotion_text):
             "reason": "分析コメント(30文字程度)" 
         }}
         """
-        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-        result = json.loads(response.text)
-        return float(result.get("final_score", dict_score)), result.get("reason", ""), result.get("pattern", "その他"), result.get("technique", ""), calc_log
+        
+        # リトライ付きで実行
+        response = generate_with_retry(model, prompt, config={"response_mime_type": "application/json"})
+        
+        text_content = response.text.strip()
+        match = re.search(r'\{.*\}', text_content, re.DOTALL)
+        if match:
+            json_str = match.group()
+            result = json.loads(json_str)
+            return float(result.get("final_score", dict_score)), result.get("reason", ""), result.get("pattern", "その他"), result.get("technique", ""), calc_log
+        else:
+            return dict_score, "AI解析エラー: JSON形式ではありません", "不明", "", calc_log
+
     except Exception as e:
         err_msg = str(e)
+        if "429" in err_msg:
+            return dict_score, "AIエラー: 利用制限(429)を超過しました。少し時間を置いて再試行してください。", "辞書判定", "", calc_log
         if "404" in err_msg:
-            return dict_score, "AIエラー: モデルが見つかりません(404)。APIキーの設定またはモデル名(gemini-2.0-flash)を確認してください。", "辞書判定", "", calc_log
+            return dict_score, "AIエラー: モデル(gemini-2.0-flash)が見つかりません(404)。APIキーの設定またはモデル名を確認してください。", "辞書判定", "", calc_log
         return dict_score, f"AIエラー: {err_msg[:20]}...", "辞書判定", "", calc_log
 
 def chat_with_ai(user_message):
     api_key = st.session_state.gemini_api_key
     if not api_key: return "APIキーを設定してください。"
-    history = [{"role": "system", "parts": [WALL_PARTNER_PROMPT]}]
+    
+    # 修正: systemロールをhistoryに含めず、モデル初期化時に設定するためリストから削除
+    history = [] 
     
     if st.session_state.notes:
         notes_context = "【現在の作品の分析ログ】\n"
@@ -406,7 +402,9 @@ def chat_with_ai(user_message):
         compare_context = f"【比較対象: {comp_title}】\n平均スコア: {avg_score:.2f}\n断片: {digest}"
         history.append({"role": "user", "parts": [compare_context]})
 
-    history.append({"role": "model", "parts": ["了解しました。"]})
+    # コンテキストがある場合のみ、AIの「了解」応答を履歴に追加（対話の整合性のため）
+    if history:
+        history.append({"role": "model", "parts": ["了解しました。データに基づき、構造的な深堀りと作品間の比較を行います。"]})
 
     for msg in st.session_state.chat_history:
         role = "user" if msg["role"] == "user" else "model"
@@ -415,13 +413,16 @@ def chat_with_ai(user_message):
     
     try:
         genai.configure(api_key=api_key)
-        # モデル名: gemini-2.0-flash
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        response = model.generate_content(history)
+        # 修正: system_instruction をここで渡す
+        model = genai.GenerativeModel('gemini-2.0-flash', system_instruction=WALL_PARTNER_PROMPT)
+        response = generate_with_retry(model, history)
         return response.text
     except Exception as e:
-        if "404" in str(e):
-            return "エラー: AIモデル(gemini-2.0-flash)が見つかりません(404)。APIキーの設定またはモデル名を確認してください。"
+        err_msg = str(e)
+        if "429" in err_msg:
+            return "エラー: 利用制限(429)を超過しました。しばらく待ってから再試行してください。"
+        if "404" in err_msg:
+            return "エラー: モデル(gemini-2.0-flash)が見つかりません。APIキーの設定を確認してください。"
         return f"エラー: {str(e)}"
 
 def format_time(seconds):
