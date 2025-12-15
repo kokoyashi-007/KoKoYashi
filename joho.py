@@ -8,69 +8,57 @@ import math
 import html
 import json
 import google.generativeai as genai
+import altair as alt
 from janome.tokenizer import Tokenizer
-# セーフティ設定用のインポートは削除しました
+
+# モデル設定
+MODEL_NAME = "gemini-2.5-flash-preview-09-2025"
+
+# 安全性設定（物語分析でブロックされないように緩和）
+SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
 
 # =========================================================
 # 0. アプリケーション設定 & CSS
 # =========================================================
-st.set_page_config(page_title="CineLog AI - Structural Analysis", layout="wide")
+st.set_page_config(page_title="EmoTrace - Narrative & Emotion", layout="wide")
 
 st.markdown("""
 <style>
     /* ベースデザイン */
     body {
         font-family: "Helvetica Neue", Arial, "Hiragino Kaku Gothic ProN", "Hiragino Sans", Meiryo, sans-serif;
-        background-color: #FAFAFA; color: #333;
+        background-color: #FDFDFD; color: #222;
     }
     h1 {
-        background: linear-gradient(45deg, #2C3E50, #4CA1AF);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        font-weight: 800; letter-spacing: -1px; margin-bottom: 0.5rem;
+        color: #2C3E50;
+        font-weight: 700; letter-spacing: -0.5px; margin-bottom: 0.5rem;
+        border-bottom: 2px solid #eee; padding-bottom: 10px;
     }
     
     /* タイムライン表示 */
     .timeline-container { position: relative; padding: 20px 0; }
-    .timeline-container::before { content: ''; position: absolute; top: 0; bottom: 0; left: 80px; width: 2px; background: #E0E0E0; }
+    .timeline-container::before { content: ''; position: absolute; top: 0; bottom: 0; left: 90px; width: 1px; background: #ddd; }
     
     .timeline-item { position: relative; margin-bottom: 24px; display: flex; align-items: flex-start; }
-    .timeline-time { width: 70px; text-align: right; padding-right: 20px; font-family: 'Courier New', monospace; font-weight: bold; color: #888; font-size: 0.9rem; padding-top: 4px; }
-    .timeline-marker { position: absolute; left: 74px; width: 14px; height: 14px; border-radius: 50%; background: #FFF; border: 3px solid #ccc; z-index: 1; margin-top: 5px; }
-    .timeline-content { flex: 1; margin-left: 30px; background: #FFF; border-radius: 12px; padding: 16px 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); border-left: 5px solid #ccc; transition: transform 0.2s; color: #333; }
+    .timeline-time { width: 80px; text-align: right; padding-right: 20px; font-family: 'Courier New', monospace; font-weight: bold; color: #666; font-size: 0.85rem; padding-top: 4px; }
+    .timeline-marker { position: absolute; left: 86px; width: 9px; height: 9px; border-radius: 50%; background: #FFF; border: 2px solid #888; z-index: 1; margin-top: 6px; }
+    .timeline-content { flex: 1; margin-left: 20px; background: #FFF; border-radius: 4px; padding: 12px 16px; border: 1px solid #eee; border-left-width: 4px; color: #333; }
     
-    .marker-pos { border-color: #4CA1AF; } .border-pos { border-left-color: #4CA1AF; }
-    .marker-neg { border-color: #FF6B6B; } .border-neg { border-left-color: #FF6B6B; }
-    .marker-mark { border-color: #f6ad55; } .border-mark { border-left-color: #f6ad55; }
-    
-    /* ステージタグ */
-    .stage-tag {
-        display: inline-block; padding: 2px 8px; border-radius: 4px; 
-        font-size: 0.75rem; font-weight: bold; color: #555; background: #eee;
-        border: 1px solid #ddd;
-    }
-
-    /* 辞書判定詳細チップ */
-    .chip {
-        display: inline-block; padding: 2px 8px; margin: 2px;
-        border-radius: 12px; font-size: 0.75rem; border: 1px solid #ddd; background: #fff; vertical-align: middle;
-    }
-    .chip-pos { border-color: #b2f5ea; color: #006d5b; background: #e6fffa; }
-    .chip-neg { border-color: #fed7d7; color: #c53030; background: #fff5f5; }
+    .marker-pos { border-color: #2a9d8f; background: #2a9d8f; } .border-pos { border-left-color: #2a9d8f; }
+    .marker-neg { border-color: #e76f51; background: #e76f51; } .border-neg { border-left-color: #e76f51; }
     
     /* チャットエリア */
-    .chat-container { border-top: 2px solid #eee; padding-top: 20px; margin-top: 30px; }
-    
-    /* ガイドボックス */
-    .guide-box {
-        background-color: #e3f2fd; border-radius: 8px; padding: 15px;
-        border-left: 5px solid #2196F3; margin-bottom: 20px;
-        font-size: 0.9rem; color: #0d47a1;
-    }
+    .chat-container { border-top: 1px solid #eee; padding-top: 20px; margin-top: 30px; }
 </style>
 """, unsafe_allow_html=True)
 
 # =========================================================
-# 1. Janome & 辞書ロジック (拡張版)
+# 1. Janome & 辞書ロジック
 # =========================================================
 
 NEGATION_WORDS = ['ない', 'ぬ', 'ず', 'ん', 'まい']
@@ -86,13 +74,11 @@ def get_tokenizer():
 
 @st.cache_resource
 def load_sentiment_dictionary():
-    """複数の辞書ファイルを読み込んで統合する"""
     dict_files = [
         {'name': 'pn_ja.dic', 'enc': 'shift-jis', 'sep': ':', 'cols': [0, 3]},
         {'name': 'wago.121808.pn', 'enc': 'utf-8', 'sep': '\t', 'cols': [1, 0]},
         {'name': 'pn.csv.m3.120408.trim', 'enc': 'utf-8', 'sep': '\t', 'cols': [0, 1]}
     ]
-    
     dic_data = {}
     loaded_files = []
     
@@ -106,14 +92,12 @@ def load_sentiment_dictionary():
                 df = pd.read_csv(path, encoding=d['enc'], sep=d['sep'], header=None, on_bad_lines='skip')
                 term_col = d['cols'][0]
                 score_col = d['cols'][1]
-                
                 if len(df.columns) > max(term_col, score_col):
                     for _, row in df.iterrows():
                         term = str(row[term_col]).strip()
                         val = row[score_col]
                         score = 0.0
-                        if isinstance(val, (int, float)):
-                            score = float(val)
+                        if isinstance(val, (int, float)): score = float(val)
                         elif isinstance(val, str):
                             val = val.lower().strip()
                             if val in ['p', 'pos', 'positive']: score = 1.0
@@ -122,14 +106,11 @@ def load_sentiment_dictionary():
                             else:
                                 try: score = float(val)
                                 except: pass
-                        dic_data[term] = score
+                        if score != 0.0: dic_data[term] = score
                     loaded_files.append(d['name'])
-            except Exception as e:
-                pass
-
+            except: pass
     if not dic_data:
         dic_data = {'良い': 1.0, '悪い': -1.0, '好き': 1.0, '嫌い': -1.0, '楽しい': 0.9, '退屈': -0.9}
-        
     return dic_data, loaded_files
 
 SENTIMENT_DICT, LOADED_DICTS = load_sentiment_dictionary()
@@ -203,284 +184,317 @@ def analyze_sentiment_advanced(text):
     return max(-1.0, min(1.0, final_score)), calc_log
 
 # =========================================================
-# 2. ステート & AI知識ベース
+# 2. ステート & AI知識ベース (詳細版復元)
 # =========================================================
 
 if 'status' not in st.session_state: st.session_state.status = 'ready'
 if 'start_time' not in st.session_state: st.session_state.start_time = None
 if 'elapsed_offset' not in st.session_state: st.session_state.elapsed_offset = 0.0
-if 'notes' not in st.session_state: st.session_state.notes = []
+if 'notes' not in st.session_state: st.session_state.notes = [] 
+if 'analyzed_notes' not in st.session_state: st.session_state.analyzed_notes = [] 
 if 'gemini_api_key' not in st.session_state: st.session_state.gemini_api_key = ""
 if 'chat_history' not in st.session_state: st.session_state.chat_history = []
-if 'characters' not in st.session_state: st.session_state.characters = [] 
 if 'chat_initialized' not in st.session_state: st.session_state.chat_initialized = False
 if 'compare_data' not in st.session_state: st.session_state.compare_data = None
 if 'compare_title' not in st.session_state: st.session_state.compare_title = ""
 
-KNOWLEDGE_STRUCTURE = """
-【物語構造分析知識ベース (Composite Narrative Analysis)】
+# ユーザー提供の物語論を体系化した知識ベース (詳細版)
+# AIの「脳内」にはこの知識を持たせるが、出力時は噛み砕かせる
+KNOWLEDGE_BASE = """
+【物語構造解析の理論的枠組み (AI参照用)】
 
-■ 1. マクロ構造フレームワーク
-* **三幕構成**: 設定(Act1) → 対立(Act2) → 解決(Act3)
-* **起承転結**: 導入(起) → 展開(承) → 飛躍・逆転(転) → 結末(結)
-* **行って帰る**: 日常から非日常への境界越え→試練と変化→日常への帰還。
+1. **物語の基本遷移 (State Transition)**
+   主人公は「初期状態」から「手段」を経て「帰結状態」へ移行する。
+   * パターンA: プラス → マイナス (転落)
+   * パターンB: マイナス → プラス (回復・成功)
+   * パターンC: 無知 → 認識 (発見・覚醒)
+   特に「マイナス→ゼロ（不遇からの脱却）」「ゼロ→プラス（獲得）」のパターンに注目。
 
-■ 2. 物語の内容モデル (状態変化 S1 → M → S2)
-物語のミクロな連鎖:「初期状態(S1) → 手段(M) → 帰結状態(S2)」
-* **重要パターン**: 
-    a. プラス→マイナス(転落) / b. マイナス→プラス(回復)
-    c. 無知→認識(発見) / d. 行為→評価
+2. **複合的構造モデル (Structural Models)**
+   * **三幕構成**: 設定(Act1) → 対立/葛藤(Act2) → 解決(Act3)
+   * **起承転結**: 導入 → 展開 → 転換/飛躍 → 結末
+   * **行って帰る (Round Trip)**: 日常 → 境界越え → 異界での試練 → 帰還（変化した日常）
 
-■ 3. 表現の評価基準 (和語・名詞の極性判定)
-AIは文脈に応じて以下の基準で「真の感情値」を判断せよ。
+3. **現代的な訴求パターン (Modern Appeal)**
+   * 問題解決: 直面する問題への有効な解決策の提示。
+   * ゴール到達: 目的への道筋。
+   * 価値観の揺さぶり: 異質な価値観との衝突と変容。
 
-**(A) 用言・和語の判断基準 (経験 vs 評価)**
-* **経験(Experience)**: 話し手自身の体験。「けだるい」「あせる」。主観的実感を重視。
-* **評価(Evaluation)**: 対象への客観的描写。「あらい」「ぐちゃぐちゃ」。
-* **受動態(レル/ラレル)の文脈**: 
-    * **恩恵**: 「誘ってもらった」「出迎えられた」→ ポジティブ
-    * **迷惑/被害**: 「荒らされた」「食べられた」→ ネガティブ
-    * **可能**: 「飲める（許容・能力）」→ ポジティブ傾向
+4. **時間とリズムの技法 (Time & Rhythm)**
+   物語の「語り」のリズムを決定する4つの描写法。
+   * **省略法 (Ellipsis)**: 書かないことによる時間の跳躍。スピードアップ。
+   * **要約法 (Summary)**: 長い時間を短く説明する。つなぎ。
+   * **情景法 (Scene)**: 会話など、リアルタイムに近い描写。重要シーン。
+   * **描写的休止法 (Pause)**: 時間を止めて詳細に描写する。感情の深化、タメ。
 
-**(B) 名詞の評価極性基準 (主観 vs 客観)**
-* **〜である・になる（評価・感情）主観**: 対象をどう評価しているか？(例: 誠実, 名手 vs 弱気, 鬱)
-* **〜である・になる（状態）客観**: その状態自体が良いか悪いか？(例: 合格者, 快晴 vs ガン)
-* **〜する（感情）主観**: その感情が良いか悪いか？(例: 感嘆 vs 失望)
-* **〜する（出来事）**: それが起きると嬉しいか嫌か？(例: 善戦, 成就 vs 病気)
-* **〜する（行為）**: その行為は賞賛されるか非難されるか？(例: 奮闘, 協力 vs 人殺し)
-* **〜がある・高まる（存在・性質）**: それが増えると良いか？(例: ご縁, 慈愛, オリジナリティ vs 菌, アクシデント)
-* **〜に行く（場所）**: そこにいると嬉しいか？(例: リゾート vs 監獄)
-
-■ 4. 表現技法 (Discourse)
-* **没入**: 自己移入、感情移入。
-* **時間**: 省略法、要約法、情景法、描写的休止法。
-* **叙法**: 非焦点化、内的焦点化、外的焦点化。
-
-■ 5. 物語構造分析チェックリスト
-1. プロットの核 / 2. 主人公(欠落) / 3. 現在位置 / 4. 過去 / 5. クエストと目的
-6. 象徴的獲得・喪失 / 7. 敵対者 / 8. 協力者 / 9. 日常世界 / 10. 変化を促す存在
-11. 旅の最深部 / 12. 喪失 / 13. 最終局面 / 14. 結末
+5. **叙法と焦点化 (Focalization)**
+   * **内的焦点化**: 特定の人物の五感・思考に限定する（感情移入）。
+   * **外的焦点化**: 客観的なカメラの視点。内面を描かない。
 """
 
+# 対話用プロンプト：知識ある友人のトーン
 WALL_PARTNER_PROMPT = f"""
-あなたは「物語構造分析の壁打ちパートナー」です。
-ユーザーの入力に基づき、提供された知識ベース（三幕構成、起承転結、行って帰る、S1→M→S2モデルなど）を複合的に活用して分析を深堀りしてください。
+あなたは、ユーザーと一緒に作品の構造や演出の面白さを深掘りする「知的なパートナー」です。
+ユーザーの鑑賞ログをもとに、気づきを与えるような対話を行ってください。
 
-【あなたの役割】
-ユーザーの意見を安易に肯定せず、構造的な視点から鋭い問いを投げかけること。
+【あなたのスタンス：50の塩梅】
+* **口調**: 「です・ます」調の丁寧語ですが、堅苦しくなりすぎないように。「〜ですね」「〜だと思います」といった、**対話的な柔らかさ**を持ってください。
+    * NG（堅すぎ）: 「拝察いたします」「示唆されています」「推測されます」「克明に」
+    * NG（崩しすぎ）: 「マジで」「〜じゃん」「ウケる」
+    * OK（理想）: 「〜のように見えますね」「〜という意図がありそうです」「ここは面白いですね」
+* **知識の出し方**: 専門用語（Act、ミッドポイント等）は使わず、**「物語の折り返し」「タメ」「急展開」**などの平易な言葉で説明してください。
+* **姿勢**: ユーザーを「観察対象」として記述するのではなく、**「体験を共有した相手」**として話しかけてください。一方的に教えるのではなく、「こういう見方もできそうですね」と視点を広げる手伝いをします。
 
-【★隠し評価基準：専門用語への感度】
-ユーザーの『感情(Feeling)』の中に、以下の専門的な要素に関する言及が含まれていた場合、「そこに気づくとは素晴らしい視点です」「音響効果への言及、鋭いですね」と**具体的に褒めて**ください。
-- **演出** (Direction), **演技** (Acting), **映像** (Visual), **音響** (Sound), **脚本/ストーリー** (Story)
+【対話のガイドライン】
+1.  **事実と感情のつながり**: 「状況は大変なのに、楽しんでいるのが面白いですね。演出がコミカルだからでしょうか？」のように、ログから読み取れる矛盾や特徴を話題にします。
+2.  **リズムの話**: 「ここで急に展開が早くなりましたね」「じっくり描いているのが印象的です」など、ペース配分について触れます。
+3.  **不足情報の確認**: 音楽や色彩など、ログにない情報が分析に必要なら、「この時、どんな音がしていましたか？」と自然に聞いてください。
+4.  **問いかけ**: 最後に、ユーザーが自分の言葉で語りたくなるような、シンプルな問いを投げかけてください。
 
-【知識ベース】
-{KNOWLEDGE_STRUCTURE}
+【知識ベース（参照用）】
+{KNOWLEDGE_BASE}
 """
 
 # =========================================================
-# 3. 分析・ヘルパー関数 (Retry機能追加版)
+# 3. 分析・ヘルパー関数
 # =========================================================
 
 def generate_with_retry(model, contents, config=None):
-    """API呼び出しのリトライ処理を行うヘルパー関数"""
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            if config:
-                return model.generate_content(contents, generation_config=config)
-            else:
-                return model.generate_content(contents)
+            # safety_settingsを常に適用
+            return model.generate_content(
+                contents, 
+                generation_config=config,
+                safety_settings=SAFETY_SETTINGS
+            )
         except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg:
-                # 429エラー(制限超過)の場合のみリトライ
-                if attempt < max_retries - 1:
-                    # エラーメッセージから待機時間を抽出、なければ指数バックオフ
-                    wait_time = 5 * (2 ** attempt)
-                    match = re.search(r"retry in (\d+(\.\d+)?)s", err_msg)
-                    if match:
-                        wait_time = float(match.group(1)) + 2.0 # バッファ追加
-                    
-                    # ユーザーに通知せずに待機
-                    time.sleep(wait_time)
-                    continue
-            # 429以外のエラー、またはリトライ上限に達した場合は例外を投げる
+            if "429" in str(e) and attempt < max_retries - 1:
+                time.sleep(2 ** attempt + 1)
+                continue
             raise e
 
+def get_safe_text(response):
+    try:
+        return response.text
+    except Exception:
+        try:
+            if response.candidates:
+                candidate = response.candidates[0]
+                if candidate.content.parts:
+                    return candidate.content.parts[0].text
+        except Exception:
+            pass
+    return ""
+
 def analyze_scene_with_ai(plot_text, emotion_text):
+    # 辞書判定
     dict_score, calc_log = analyze_sentiment_advanced(emotion_text)
-    
-    log_summary = "検出語なし"
-    if calc_log:
-        items = [f"{item['term']}({item['score']})" for item in calc_log if item.get('weight', 0) > 0]
-        log_summary = ", ".join(items)
-    
-    dict_info = f"辞書計算値: {dict_score:.3f} (根拠: {log_summary})"
+    dict_info = f"辞書スコア:{dict_score:.2f}"
     
     api_key = st.session_state.gemini_api_key
     if not api_key:
-        return dict_score, "API未設定", "辞書判定", "なし", calc_log
+        return dict_score, 0.0, "API未設定", "", calc_log, dict_score
 
     try:
         genai.configure(api_key=api_key)
-        # モデル名: gemini-2.0-flash (ユーザー指定)
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = genai.GenerativeModel(MODEL_NAME)
         
         prompt = f"""
-        あなたは物語分析の専門家です。以下のシーンを分析しJSONで出力してください。
+        物語のワンシーンを分析し、JSONを生成してください。
         
-        【タスク】
-        1. 辞書判定スコア({dict_score})を参考に、文脈を考慮して最終スコアを決定。
-           特に「kijun.pdf」基準にある「受動態の恩恵/迷惑」や「経験/評価」の区別に注意してください。
-        2. あらすじ(Fact)から、知識ベースにある「変化パターン」「表現技法」「構造的位置」を分析。
-        
-        【★隠し評価ミッション】
-        もし感情(Feeling)の中に「音響」「照明」「カメラ」「演技」「構成」などの専門的な要素への言及があれば、reasonの中で褒めてください。
-
         【入力】
-        - 辞書判定: {dict_info}
-        - あらすじ(Fact): {plot_text}
-        - 感情(Feeling): {emotion_text}
+        Plot: {plot_text} (出来事)
+        Feeling: {emotion_text} (ユーザーの気持ち)
+        DictData: {dict_info}
         
-        【知識ベース】
-        {KNOWLEDGE_STRUCTURE}
+        【知識ベース (参照用)】
+        {KNOWLEDGE_BASE}
         
-        JSON出力:
-        {{ 
-            "final_score": -1.0〜1.0, 
-            "pattern": "変化パターン", 
-            "technique": "技法/構造", 
-            "reason": "分析コメント(30文字程度)" 
-        }}
+        【指示】
+        以下の要素を出力してください。専門用語は使わず、**丁寧だが堅苦しくない言葉**で。
+        
+        1. **story_score**: 客観的な状況の良し悪し（成功/失敗, 安全/ピンチ）。
+        2. **user_score**: あなたの主観（楽しい/つまらない）。Feelingを最優先。
+        3. **reason**: 
+           - この場面のスコアの理由を、**話しかけるような口調**で短く説明してください。
+           - 「示唆する」などの論文調や、「～だぜ」などの乱暴な言葉は禁止。
+           - 例：「ピンチの場面ですが、ワクワクする展開なのでプラスです。」
+        
+        Output JSON format:
+        {{ "story_score": float, "user_score": float, "reason": string }}
         """
         
-        # リトライ付きで実行
         response = generate_with_retry(model, prompt, config={"response_mime_type": "application/json"})
+        text_content = get_safe_text(response).strip()
+        text_content = text_content.replace('```json', '').replace('```', '')
         
-        text_content = response.text.strip()
+        if not text_content:
+             return dict_score, 0.0, "AI応答なし", "", calc_log, dict_score
+
         match = re.search(r'\{.*\}', text_content, re.DOTALL)
         if match:
-            json_str = match.group()
-            result = json.loads(json_str)
-            return float(result.get("final_score", dict_score)), result.get("reason", ""), result.get("pattern", "その他"), result.get("technique", ""), calc_log
+            result = json.loads(match.group())
+            return (
+                float(result.get("user_score", dict_score)),
+                float(result.get("story_score", 0.0)),
+                result.get("reason", ""),
+                calc_log,
+                dict_score
+            )
         else:
-            return dict_score, "AI解析エラー: JSON形式ではありません", "不明", "", calc_log
+            return dict_score, 0.0, "解析エラー", "", calc_log, dict_score
 
     except Exception as e:
-        err_msg = str(e)
-        if "429" in err_msg:
-            return dict_score, "AIエラー: 利用制限(429)を超過しました。少し時間を置いて再試行してください。", "辞書判定", "", calc_log
-        if "404" in err_msg:
-            return dict_score, "AIエラー: モデル(gemini-2.0-flash)が見つかりません(404)。APIキーの設定またはモデル名を確認してください。", "辞書判定", "", calc_log
-        return dict_score, f"AIエラー: {err_msg[:20]}...", "辞書判定", "", calc_log
+        return dict_score, 0.0, f"エラー: {str(e)[:20]}", "", calc_log, dict_score
+
+def generate_initial_structural_analysis(notes):
+    """
+    全ログ終了後、物語全体の構造を分析し、ユーザーへの最初の問いかけを生成する
+    """
+    api_key = st.session_state.gemini_api_key
+    if not api_key: return "APIキーを設定してください。"
+    
+    # ログをテキスト化
+    story_log = ""
+    for n in notes:
+        story_log += f"- [{n['display_time']}] Plot:{n['plot']} / Feeling:{n['emotion_content']} (UserScore:{n['sentiment']:.2f}, StoryScore:{n.get('story_score',0):.2f})\n"
+    
+    prompt = f"""
+    以下はユーザーが記録した物語の鑑賞ログです。**これが物語の全容であり、ここで完結しています。**
+    `KNOWLEDGE_BASE` の理論に基づきつつ、**ラジオのパーソナリティのような、知的で聞きやすい語り口**で振り返りを作成してください。
+
+    【ログ】
+    {story_log}
+
+    【トーン＆マナー：50の塩梅】
+    * **禁止ワード**: 「拝見」「拝察」「克明」「一気呵成」「牽引」「収束」「～と思われる」「～である」「鑑賞者」。
+    * **推奨ワード**: 「～ですね」「～かもしれません」「～という印象です」。
+    * **姿勢**: ユーザーを「被験者」のように分析するのではなく、**「体験を共有した相手」**として「あなた」と呼びかけてください。
+
+    【出力フォーマット】
+    
+    ## 🎬 鑑賞体験の振り返り
+    
+    **1. 感情の動き**
+    （専門的な分析を裏側に持ちつつ、感情がどう動いたかを「波」や「山」のイメージで分かりやすく説明してください）
+    
+    **2. 状況と感情の面白さ**
+    （PlotとFeelingにギャップがある場所や、ぴったり合っている場所について、「ここが面白いですね」という視点で触れてください）
+    
+    **3. 物語のリズム**
+    （展開のスピードや、時間の使い方について。細かい秒数には触れず、感覚的な速さについて話してください）
+
+    ---
+    **🤖 考えるヒント**
+    （もし分析に足りない情報があれば質問してください。なければ、結末の演出やテーマについて、ユーザーが答えやすい問いを一つだけ投げかけてください）
+    """
+    
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(MODEL_NAME)
+        response = generate_with_retry(model, prompt)
+        text = get_safe_text(response)
+        if not text:
+            # フォールバックメッセージ
+            return "物語の構造分析を行おうとしましたが、応答の生成に失敗しました。チャット欄で、気になったシーンについて話しかけてみてください。"
+        return text
+    except Exception as e:
+        return f"構造分析エラー: {str(e)}"
 
 def chat_with_ai(user_message):
     api_key = st.session_state.gemini_api_key
     if not api_key: return "APIキーを設定してください。"
     
-    # 修正: systemロールをhistoryに含めず、モデル初期化時に設定するためリストから削除
-    history = [] 
-    
-    if st.session_state.notes:
-        notes_context = "【現在の作品の分析ログ】\n"
-        for note in st.session_state.notes[-5:]: 
-            notes_context += f"- [{note['display_time']}] Pattern:{note['stage']} / Feeling:{note['emotion_content']}\n"
+    history = []
+    # 直近の分析ログをコンテキストに追加
+    if st.session_state.analyzed_notes:
+        notes_context = "【参照用: 直近のシーンログ】\n"
+        for note in st.session_state.analyzed_notes[-5:]: 
+            notes_context += f"- Time:{note['display_time']} / Plot:{note['plot']} / Feeling:{note['emotion_content']} (UserScore:{note['sentiment']:.2f}, StoryScore:{note.get('story_score',0):.2f})\n"
         history.append({"role": "user", "parts": [notes_context]})
     
-    if st.session_state.compare_data is not None:
-        comp_df = st.session_state.compare_data
-        comp_title = st.session_state.compare_title
-        avg_score = comp_df['sentiment'].mean()
-        n = len(comp_df)
-        indices = [0, n//2, n-1] if n > 0 else []
-        digest = ""
-        for i in indices:
-            if i < n:
-                row = comp_df.iloc[i]
-                digest += f"- T={row.get('display_time','?')} Score={row.get('sentiment',0):.2f} Plot={row.get('plot','')[:20]}...\n"
-        
-        compare_context = f"【比較対象: {comp_title}】\n平均スコア: {avg_score:.2f}\n断片: {digest}"
-        history.append({"role": "user", "parts": [compare_context]})
-
-    # コンテキストがある場合のみ、AIの「了解」応答を履歴に追加（対話の整合性のため）
-    if history:
-        history.append({"role": "model", "parts": ["了解しました。データに基づき、構造的な深堀りと作品間の比較を行います。"]})
-
+    # チャット履歴
     for msg in st.session_state.chat_history:
         role = "user" if msg["role"] == "user" else "model"
         history.append({"role": role, "parts": [msg["content"]]})
+    
     history.append({"role": "user", "parts": [user_message]})
     
     try:
         genai.configure(api_key=api_key)
-        # 修正: system_instruction をここで渡す
-        model = genai.GenerativeModel('gemini-2.0-flash', system_instruction=WALL_PARTNER_PROMPT)
+        model = genai.GenerativeModel(MODEL_NAME, system_instruction=WALL_PARTNER_PROMPT)
         response = generate_with_retry(model, history)
-        return response.text
+        return get_safe_text(response)
     except Exception as e:
-        err_msg = str(e)
-        if "429" in err_msg:
-            return "エラー: 利用制限(429)を超過しました。しばらく待ってから再試行してください。"
-        if "404" in err_msg:
-            return "エラー: モデル(gemini-2.0-flash)が見つかりません。APIキーの設定を確認してください。"
-        return f"エラー: {str(e)}"
+        return f"通信エラー: {str(e)}"
 
 def format_time(seconds):
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
     return f"{h:d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
 
-def calculate_decay_curve(df_notes, duration):
+def calculate_decay_curve(df_notes, duration, target_col='sentiment'):
     max_time = int(duration) + 1
     decay_scores = np.zeros(max_time)
-    events = {int(row['timestamp']): row['sentiment'] for _, row in df_notes.iterrows() if int(row['timestamp']) < max_time}
-    LIFETIME = 60.0; last_t = -999; last_s = 0.0
+    
+    events = {}
+    for _, row in df_notes.iterrows():
+        t_idx = int(row['timestamp'])
+        if t_idx < max_time:
+            events[t_idx] = row.get(target_col, 0.0)
+            
+    LIFETIME = 60.0
+    last_t = -999
+    last_s = 0.0
+    
     for t in range(max_time):
-        if t in events: decay_scores[t] = events[t]; last_t = t; last_s = events[t]
+        if t in events:
+            decay_scores[t] = events[t]
+            last_t = t
+            last_s = events[t]
         elif last_t != -999:
             delta = t - last_t
-            if delta < LIFETIME: decay_scores[t] = last_s * math.cos((math.pi/2)*(delta/LIFETIME))
-    return pd.DataFrame({'timestamp': np.arange(max_time), 'sentiment': decay_scores})
+            if delta < LIFETIME:
+                decay_scores[t] = last_s * math.cos((math.pi/2)*(delta/LIFETIME))
+            else:
+                decay_scores[t] = 0.0
+                last_t = -999
+                last_s = 0.0
+                
+    return pd.DataFrame({'timestamp': np.arange(max_time), 'score': decay_scores})
 
-def generate_html_report(df, title, chars):
+def generate_html_report(df, title):
     rows_html = ""
     for _, row in df.sort_values('timestamp').iterrows():
         score = row['sentiment']
-        border_color = '#4CA1AF' if score >= 0.1 else '#FF6B6B' if score <= -0.1 else '#aaa'
-        bg_color = '#f0fcf9' if score >= 0.1 else '#fff5f5' if score <= -0.1 else '#fff'
         
-        chips_html = ""
-        if row.get('calc_log'):
-            for item in row['calc_log']:
-                if item.get('weight', 0) > 0:
-                    c_col = "#006d5b" if item['score'] > 0 else "#c53030"
-                    c_bg = "#b2f5ea" if item['score'] > 0 else "#fed7d7"
-                    chips_html += f"<span style='display:inline-block;padding:2px 6px;margin:1px;border-radius:10px;font-size:0.7em;background:{c_bg};color:{c_col};border:1px solid {c_col}'>{html.escape(item['term'])} {item['score']}</span>"
-                elif '逆接' in item.get('reason', ''):
-                    chips_html += f"<span style='display:inline-block;padding:2px 6px;margin:1px;border-radius:10px;font-size:0.7em;background:#fff3cd;color:#856404;border:1px solid #ffeeba'>逆接</span>"
+        border_color = '#2a9d8f' if score >= 0.1 else '#e76f51' if score <= -0.1 else '#ccc'
         
-        ai_comment = html.escape(row.get('comment', ''))
+        # 安全な文字列取得
+        plot_txt = str(row.get('plot', '')) if pd.notna(row.get('plot', '')) else ''
+        emo_txt = str(row.get('emotion_content', '')) if pd.notna(row.get('emotion_content', '')) else ''
+        comment_txt = str(row.get('comment', '')) if pd.notna(row.get('comment', '')) else ''
+        
         rows_html += f"""
-        <div style="border-left:5px solid {border_color}; background:{bg_color}; padding:15px; margin-bottom:15px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.05);">
-            <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
-                <div><span style="font-family:monospace; font-weight:bold; color:#666;">{row['display_time']}</span> <span style="background:#e2e8f0; padding:2px 8px; border-radius:4px; font-size:0.8em;">{row['stage']}</span></div>
-                <strong style="color:{border_color}">{score:+.2f}</strong>
+        <div style="border-left:4px solid {border_color}; background:#fff; padding:12px; margin-bottom:12px; border-radius:4px; box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+            <div style="font-size:0.85em; color:#666; font-family:monospace; margin-bottom:4px; display:flex; justify-content:space-between;">
+                <span>{row['display_time']}</span>
+                <strong style="color:#555;">User: {score:+.2f} / Story: {row.get('story_score', 0):+.2f}</strong>
             </div>
-            <div style="margin-bottom:8px;">
-                <div style="font-size:1.1em; font-weight:bold; margin-bottom:4px;">💭 {html.escape(row['emotion_content'])}</div>
-                {f"<div style='font-size:0.9em; color:#666; font-style:italic;'>📖 {html.escape(row.get('plot',''))}</div>" if row.get('plot') else ""}
+            <div style="margin-bottom:6px;">
+                <span style="font-weight:bold; color:#333;">{html.escape(plot_txt)}</span>
             </div>
-            <div style="border-top:1px dashed #ccc; padding-top:8px; font-size:0.9em;">
-                <div style="margin-bottom:4px;">🤖 <b>AI Comment:</b> {ai_comment}</div>
-                <div>📚 <b>Dict Basis:</b> {chips_html if chips_html else "<span style='color:#999'>None</span>"}</div>
+            <div style="font-size:0.9em; color:#555;">
+                💭 {html.escape(emo_txt)}
+            </div>
+            <div style="margin-top:8px; font-size:0.85em; color:#444; border-top:1px dashed #eee; padding-top:4px;">
+                🤖 {html.escape(comment_txt)}
             </div>
         </div>"""
     
-    display_title = html.escape(title) if title else "Analysis"
-    return f"<html><body style='font-family:sans-serif;padding:20px;'><h1>🎬 {display_title} Report</h1>{rows_html}</body></html>"
-
-def init_chat_with_analysis(df):
-    st.session_state.chat_initialized = True
+    return f"<html><body style='font-family:sans-serif;padding:20px;background:#f9f9f9;'><h2>{html.escape(title)} Analysis Report</h2>{rows_html}</body></html>"
 
 # =========================================================
 # 4. メインUI
@@ -492,39 +506,65 @@ with st.sidebar:
     
     st.divider()
     
-    # --- 比較データ読み込み機能 ---
-    with st.expander("📂 比較・過去データ読込"):
-        st.info("過去に保存したCSVファイルを読み込むと、グラフを重ねて比較できます。")
-        uploaded_file = st.file_uploader("比較用CSVファイル", type=["csv"])
-        if uploaded_file is not None:
+    # 復元機能の追加
+    with st.expander("📂 データの読み込み (復元)"):
+        uploaded_restore = st.file_uploader("過去のログ(CSV)", type=["csv"], key="restore_csv")
+        if uploaded_restore:
+            try:
+                df_restore = pd.read_csv(uploaded_restore)
+                if st.button("このデータを復元して分析"):
+                    # データを辞書リストに変換
+                    restored_notes = df_restore.to_dict('records')
+                    st.session_state.notes = restored_notes
+                    st.session_state.analyzed_notes = restored_notes
+                    
+                    # 状態を分析完了に
+                    st.session_state.status = 'finished'
+                    
+                    # 時間を末尾に合わせる
+                    if not df_restore.empty:
+                        st.session_state.elapsed_offset = float(df_restore['timestamp'].max())
+                    
+                    # チャット履歴はリセット
+                    st.session_state.chat_history = []
+                    
+                    # APIキーがあれば初期分析を生成
+                    if st.session_state.gemini_api_key:
+                        with st.spinner("データを読み込み、構造を分析中..."):
+                            initial_msg = generate_initial_structural_analysis(restored_notes)
+                            st.session_state.chat_history.append({"role": "model", "content": initial_msg})
+                            st.session_state.chat_initialized = True
+                    
+                    st.success("データを復元しました。")
+                    time.sleep(1)
+                    st.rerun()
+            except Exception as e:
+                st.error(f"読み込みエラー: {e}")
+
+    with st.expander("📂 過去データの比較"):
+        uploaded_file = st.file_uploader("CSVファイル", type=["csv"], key="compare_csv")
+        if uploaded_file:
             try:
                 compare_df = pd.read_csv(uploaded_file)
-                if 'timestamp' in compare_df.columns and 'sentiment' in compare_df.columns:
-                    st.session_state.compare_data = compare_df
-                    st.session_state.compare_title = uploaded_file.name.replace("_data.csv", "")
-                    st.success(f"『{st.session_state.compare_title}』をロードしました")
-                else:
-                    st.error("CSVの形式が正しくありません")
-            except Exception as e:
-                st.error(f"読込エラー: {e}")
-        
-        if st.button("比較データをクリア"):
+                st.session_state.compare_data = compare_df
+                st.session_state.compare_title = uploaded_file.name
+                st.success(f"『{st.session_state.compare_title}』読込完了")
+            except: st.error("読込エラー")
+        if st.button("比較クリア"):
             st.session_state.compare_data = None
             st.session_state.compare_title = ""
             st.rerun()
-    
+
     st.divider()
-    with st.expander("📚 知識ベース確認"): st.markdown(KNOWLEDGE_STRUCTURE)
-    
-    st.divider()
-    # 新しい分析を始めるボタン
-    if st.button("🗑️ 新しい分析を始める (リセット)", type="primary", use_container_width=True):
-        for key in ['status', 'start_time', 'elapsed_offset', 'notes', 'chat_history', 'chat_initialized', 'characters', 'compare_data', 'compare_title']:
-             if key in st.session_state: del st.session_state[key]
+    if st.button("🗑️ 新規作成 (リセット)", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
         st.rerun()
 
-st.title("🎬 CineLog AI - Structural Analysis")
-movie_title = st.text_input("作品名", placeholder="作品名を入力", label_visibility="collapsed")
+st.title("EmoTrace - Narrative Analysis")
+st.caption("あらゆる物語の構造と感情の揺れ動きを分析し、体験を言語化するツール")
+
+work_title = st.text_input("作品名", placeholder="作品名を入力", label_visibility="collapsed")
 
 # プレイヤー制御
 c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
@@ -539,137 +579,214 @@ with c2:
         st.session_state.status = 'paused'; st.session_state.elapsed_offset += time.time() - st.session_state.start_time; st.rerun()
 with c3: st.metric("Time", format_time(current_time), label_visibility="collapsed")
 with c4:
-    if st.button("■ 終了/分析", type="secondary", use_container_width=True, disabled=(st.session_state.status == 'ready')):
+    # 終了・分析トリガー
+    if st.button("■ 終了・構造分析へ", type="secondary", use_container_width=True, disabled=(st.session_state.status == 'ready')):
         if st.session_state.status == 'playing': st.session_state.elapsed_offset += time.time() - st.session_state.start_time
-        st.session_state.status = 'finished'; st.rerun()
+        st.session_state.status = 'finished'
+        
+        if st.session_state.notes:
+            progress = st.progress(0)
+            status_txt = st.empty()
+            analyzed_data = []
+            
+            total = len(st.session_state.notes)
+            for i, note in enumerate(st.session_state.notes):
+                status_txt.text(f"シーン解析中... ({i+1}/{total})")
+                if i > 0: time.sleep(0.5) # レート制限対策で少し待機
+                
+                user_sc, story_sc, rsn, log, dict_sc = analyze_scene_with_ai(note['plot'], note['emotion_content'])
+                new_note = note.copy()
+                new_note.update({
+                    "sentiment": user_sc, 
+                    "story_score": story_sc,
+                    "comment": rsn, 
+                    "calc_log": log, "dictionary_score": dict_sc 
+                })
+                analyzed_data.append(new_note)
+                progress.progress((i + 1) / total)
+            
+            st.session_state.analyzed_notes = analyzed_data
+            
+            # 全体構造分析の生成
+            if st.session_state.gemini_api_key:
+                status_txt.text("物語全体の構造を構築中...")
+                initial_msg = generate_initial_structural_analysis(analyzed_data)
+                st.session_state.chat_history.append({"role": "model", "content": initial_msg})
+                st.session_state.chat_initialized = True
+
+            status_txt.empty()
+            progress.empty()
+            st.toast("分析完了。物語の構造を紐解きます。", icon="📝")
+        
+        st.rerun()
 
 # 入力フォーム
 if st.session_state.status in ['playing', 'paused']:
     st.divider()
-    st.info("💡 **使い分け**: 💭 **感情(Feeling)**=あなたの心の動き(グラフ) / 📖 **あらすじ(Fact)**=物語の出来事(構造分析)")
-    
     with st.form("log_form", clear_on_submit=True):
         c_plot, c_emo = st.columns(2)
-        plot = c_plot.text_area("📖 Fact (あらすじ/出来事)", height=100, placeholder="主人公が〇〇をした、××が起きた")
-        emo = c_emo.text_area("💭 Feeling (感想/感情)", height=100, placeholder="ここで感動した、ハラハラした")
+        plot = c_plot.text_area("📖 プロット (事実・出来事)", height=80, placeholder="例: 主人公がライバルに敗北した。雨が降り始めた。")
+        emo = c_emo.text_area("💭 感情・印象 (感覚)", height=80, placeholder="例: 悔しい。画面が暗くて重苦しい。時間が長く感じた。")
         
-        if st.form_submit_button("記録 & 分析", type="primary", use_container_width=True):
+        if st.form_submit_button("記録", type="primary", use_container_width=True):
             if plot or emo:
                 ts = current_time
-                sc, rsn, pat, tch, log = analyze_scene_with_ai(plot, emo)
                 st.session_state.notes.append({
                     "timestamp": ts, "display_time": format_time(ts),
-                    "plot": plot, "emotion_content": emo, 
-                    "sentiment": sc, "stage": pat, "technique": tch, "comment": rsn, "calc_log": log
+                    "plot": plot, "emotion_content": emo
                 })
-                st.toast("記録・分析完了", icon="✅")
+                st.toast("ログを記録しました")
+                
+    # 記録済みログの編集機能 (追加)
+    if st.session_state.notes:
+        with st.expander("📝 記録済みログの確認・編集", expanded=False):
+            # インデックスを逆順にして新しいものを上に
+            for i in range(len(st.session_state.notes) - 1, -1, -1):
+                note = st.session_state.notes[i]
+                c_del, c_edit = st.columns([1, 6])
+                
+                with c_del:
+                    st.write(f"No.{i+1}")
+                    if st.button("削除", key=f"del_{i}", use_container_width=True):
+                        st.session_state.notes.pop(i)
+                        st.rerun()
+                
+                with c_edit:
+                    c1, c2 = st.columns(2)
+                    new_plot = c1.text_area(f"[{note['display_time']}] プロット", value=note['plot'], key=f"p_{i}", height=70)
+                    new_emo = c2.text_area("感情・印象", value=note['emotion_content'], key=f"e_{i}", height=70)
+                    
+                    # 変更を即時反映
+                    if new_plot != note['plot']:
+                        st.session_state.notes[i]['plot'] = new_plot
+                    if new_emo != note['emotion_content']:
+                        st.session_state.notes[i]['emotion_content'] = new_emo
+                st.divider()
 
-# 結果表示画面 (Finishedモード)
+# 分析結果表示
 if st.session_state.status == 'finished':
     st.divider()
-    st.header("📊 分析レポート")
+    st.header("📊 Narrative Structure & Rhythm")
     
-    if not st.session_state.notes:
-        st.warning("記録されたメモがありません。")
-    else:
-        df = pd.DataFrame(st.session_state.notes)
+    if st.session_state.analyzed_notes:
+        df = pd.DataFrame(st.session_state.analyzed_notes)
+        max_time = max(df['timestamp'].max(), 60)
         
-        # 1. 感情曲線
-        st.subheader("1. 感情曲線 (User Feeling)")
-        st.caption("入力された**「感情(Feeling)」**に基づいて算出された、あなたの心の動きです。")
+        # 1. 感情曲線 (物語 vs 感情)
+        st.subheader("1. 感情体験と物語の雰囲気")
+        st.info("💡 緑の実線: あなたの感情スコア / 青の点線: 物語の状況スコア (客観)")
         
-        max_time_current = max(st.session_state.elapsed_offset, df['timestamp'].max()) if not df.empty else 60
-        max_time_compare = st.session_state.compare_data['timestamp'].max() if st.session_state.compare_data is not None else 0
-        final_max_time = max(max_time_current, max_time_compare)
-        if final_max_time == 0: final_max_time = 60
-
-        df_decay_current = calculate_decay_curve(df, final_max_time)
-        df_decay_current = df_decay_current.set_index('timestamp')
-        df_decay_current.columns = ['Current']
-
+        # ユーザー感情の減衰曲線
+        df_user = calculate_decay_curve(df, max_time, target_col='sentiment')
+        df_user['Type'] = 'User Sentiment'
+        
+        # 物語雰囲気の減衰曲線
+        df_story = calculate_decay_curve(df, max_time, target_col='story_score')
+        df_story['Type'] = 'Story Tone'
+        
+        # データ結合
+        df_chart_all = pd.concat([df_user, df_story])
+        df_chart_all['Minutes'] = df_chart_all['timestamp'] / 60
+        
+        # Altairチャート
+        base = alt.Chart(df_chart_all).encode(
+            x=alt.X('Minutes', title='経過時間 (分)'),
+            y=alt.Y('score', title='スコア', scale=alt.Scale(domain=[-1.2, 1.2])),
+            tooltip=['Minutes', 'score', 'Type']
+        ).properties(height=350)
+        
+        # ユーザー感情線 (実線, 緑)
+        line_user = base.transform_filter(
+            alt.datum.Type == 'User Sentiment'
+        ).mark_line(color='#2a9d8f', size=3)
+        
+        # 物語雰囲気線 (点線, 青)
+        line_story = base.transform_filter(
+            alt.datum.Type == 'Story Tone'
+        ).mark_line(color='#2c3e50', strokeDash=[4, 4], size=2, opacity=0.7)
+        
+        # 過去データ比較があれば追加
+        layers = [line_story, line_user]
+        
         if st.session_state.compare_data is not None:
-            df_decay_compare = calculate_decay_curve(st.session_state.compare_data, final_max_time)
-            df_decay_compare = df_decay_compare.set_index('timestamp')
-            df_decay_compare.columns = [f"Compare: {st.session_state.compare_title}"]
-            st.line_chart(pd.concat([df_decay_current, df_decay_compare], axis=1))
-            st.success(f"📈 『{st.session_state.compare_title}』と比較中")
-        else:
-            st.line_chart(df_decay_current, color="#FF4B4B")
+            max_t_comp = st.session_state.compare_data['timestamp'].max()
+            df_comp_decay = calculate_decay_curve(st.session_state.compare_data, max(max_time, max_t_comp), target_col='sentiment')
+            df_comp_decay['Minutes'] = df_comp_decay['timestamp'] / 60
+            
+            comp_line = alt.Chart(df_comp_decay).mark_line(color='#aaa', strokeDash=[2,2]).encode(
+                x='Minutes',
+                y='score',
+                tooltip=[alt.Tooltip('score', title='Compare Score')]
+            )
+            layers.insert(0, comp_line) # 最背面に
 
-        st.write("")
-        
+        st.altair_chart(alt.layer(*layers).interactive(), use_container_width=True)
+
         # 2. タイムライン
-        st.subheader("2. 物語構造分析 (Story Structure)")
-        st.caption("入力された**「あらすじ(Fact)」**に基づいてAIが分析した、物語の構成要素と雰囲気の移り変わりです。")
-        
-        df = df.sort_values('timestamp')
-        timeline_html = '<div class="timeline-container">'
-        
-        for index, row in df.iterrows():
-            score = row['sentiment']
-            stage = row.get('stage', 'その他')
-            comment = row.get('comment', '')
+        st.subheader("2. シーン詳細と構造解析")
+        tl_html = '<div class="timeline-container">'
+        for _, row in df.sort_values('timestamp').iterrows():
+            sc = row['sentiment']
+            ssc = row.get('story_score', 0.0)
             
-            # クラス設定
-            if score >= 0.1: m_cls, c_cls = "marker-pos", "border-pos"
-            elif score <= -0.1: m_cls, c_cls = "marker-neg", "border-neg"
-            else: m_cls, c_cls = "", ""
+            # ユーザー感情による色分け
+            cls = "marker-pos" if sc > 0.1 else "marker-neg" if sc < -0.1 else ""
+            b_cls = "border-pos" if sc > 0.1 else "border-neg" if sc < -0.1 else ""
             
-            plot_html = f"<div style='font-size:0.9rem;color:#555;margin-bottom:4px;font-style:italic;background:#f9f9f9;padding:4px;'>📖 (Fact) {html.escape(row.get('plot', ''))}</div>" if row.get('plot') else ""
-            emotion_html = f"<div style='font-weight:bold;color:#333;'>💭 (Feeling) {html.escape(row.get('emotion_content', ''))}</div>"
+            # 物語スコアの表示色
+            ssc_color = "#2a9d8f" if ssc > 0.1 else "#e76f51" if ssc < -0.1 else "#999"
             
-            comment_html = ""
-            if "API未設定" in comment or "AIエラー" in comment:
-                reason_chips = ""
-                if row.get('calc_log'):
-                    for item in row['calc_log']:
-                        if item.get('weight', 0) > 0:
-                            cls = "chip-pos" if item['score'] > 0 else "chip-neg"
-                            reason_chips += f"<span class='chip {cls}'>{html.escape(item['term'])} <b>{item['score']}</b></span>"
-                        elif '逆接' in item.get('reason', ''):
-                            reason_chips += f"<span class='chip' style='background:#fff3cd'>逆接 ➡ Boost</span>"
-                
-                comment_html = f"<div style='margin-top:8px;font-size:0.85rem;color:#666;border-top:1px dashed #ccc;padding-top:4px;'>📚 <b>辞書判定内訳:</b> {reason_chips}</div>" if reason_chips else f"<div style='margin-top:8px;font-size:0.85rem;color:#999;border-top:1px dashed #ccc;padding-top:4px;'>📚 辞書判定: 感情語なし</div>"
-            else:
-                comment_html = f"<div style='margin-top:8px;font-size:0.85rem;color:#666;border-top:1px dashed #ccc;padding-top:4px;line-height:1.4;'>🤖 <b>AI構造分析:</b> {html.escape(comment)}</div>"
-
-            timeline_html += f"""<div class="timeline-item"><div class="timeline-time">{row['display_time']}</div><div class="timeline-marker {m_cls}"></div><div class="timeline-content {c_cls}"><div style="display:flex;justify-content:space-between;margin-bottom:8px;align-items:center;"><div><span class="stage-tag">{stage}</span></div><span style="font-size:0.8rem;font-weight:bold;color:#FF4B4B;">スコア: {score:+.2f}</span></div>{plot_html}{emotion_html}{comment_html}</div></div>"""
+            # 安全な文字列取得（NaN対策）
+            plot_txt = str(row.get('plot', '')) if pd.notna(row.get('plot', '')) else ''
+            emo_txt = str(row.get('emotion_content', '')) if pd.notna(row.get('emotion_content', '')) else ''
+            comment_txt = str(row.get('comment', '')) if pd.notna(row.get('comment', '')) else ''
+            
+            tl_html += f"""
+            <div class="timeline-item">
+                <div class="timeline-time">{row['display_time']}</div>
+                <div class="timeline-marker {cls}"></div>
+                <div class="timeline-content {b_cls}">
+                    <div style="display:flex; justify-content:flex-end; align-items:center; margin-bottom:4px; font-size:0.8em; color:#666;">
+                        <span style="margin-right:10px;">Story: <strong style="color:{ssc_color};">{ssc:+.2f}</strong></span>
+                        <span>User: <strong>{sc:+.2f}</strong></span>
+                    </div>
+                    <div style="font-size:0.95em; font-weight:bold; margin-bottom:4px;">{html.escape(plot_txt)}</div>
+                    <div style="font-size:0.9em; color:#666; font-style:italic; margin-bottom:8px;">💭 {html.escape(emo_txt)}</div>
+                    <div style="font-size:0.85em; color:#333; background:#f9f9f9; padding:6px; border-radius:4px;">
+                        🤖 {html.escape(comment_txt)}
+                    </div>
+                </div>
+            </div>"""
+        st.markdown(tl_html + '</div>', unsafe_allow_html=True)
         
-        timeline_html += '</div>'
-        st.markdown(timeline_html, unsafe_allow_html=True)
-    
-    st.divider()
-    st.subheader("💾 データ保存")
-    col_dl1, col_dl2 = st.columns(2)
-    safe_title = movie_title if movie_title else "Analysis"
-    if st.session_state.notes:
+        # ダウンロード
         csv = df.to_csv(index=False).encode('utf-8-sig')
-        col_dl1.download_button("📈 生データ (CSV)", csv, f'{safe_title}_data.csv', 'text/csv', use_container_width=True)
-        html_log = generate_html_report(df, safe_title, st.session_state.characters).encode('utf-8')
-        col_dl2.download_button("📄 レポート (HTML)", html_log, f'{safe_title}_report.html', 'text/html', use_container_width=True)
-    
-    # AI感想戦
+        html_rep = generate_html_report(df, work_title if work_title else "Analysis").encode('utf-8')
+        c_d1, c_d2 = st.columns(2)
+        c_d1.download_button("CSV保存", csv, "log.csv", "text/csv")
+        c_d2.download_button("レポート保存", html_rep, "report.html", "text/html")
+
+    # 3. 構造分析チャット
     st.divider()
-    st.subheader("🤖 AI構造分析チャット (Composite Analysis)")
+    st.subheader("🧬 構造分析・深掘り (Structural Analysis)")
     
     if st.session_state.gemini_api_key:
-        if st.session_state.compare_data is not None:
-            st.caption(f"現在の作品と『{st.session_state.compare_title}』を比較しながら、構造について議論できます。")
-        else:
-            st.caption("知識ベースに基づいて、AIが物語の構造について壁打ちを行います。")
-        
+        # チャット履歴表示
         for chat in st.session_state.chat_history:
-            with st.chat_message(chat["role"]): st.write(chat["content"])
-            
-        if prompt := st.chat_input("物語の構造についてAIと議論する..."):
+            role = "user" if chat["role"] == "user" else "assistant"
+            with st.chat_message(role):
+                st.markdown(chat["content"])
+        
+        # 入力欄
+        if prompt := st.chat_input("分析に対する考察や、自身の解釈を入力..."):
             st.session_state.chat_history.append({"role": "user", "content": prompt})
-            st.rerun() 
-
+            st.rerun()
+            
+        # AI応答生成
         if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
-            last_prompt = st.session_state.chat_history[-1]["content"]
-            with st.spinner("思考中..."):
-                response = chat_with_ai(last_prompt)
-                st.session_state.chat_history.append({"role": "assistant", "content": response})
+            with st.spinner("考察を深めています..."):
+                resp = chat_with_ai(st.session_state.chat_history[-1]["content"])
+                st.session_state.chat_history.append({"role": "model", "content": resp})
                 st.rerun()
     else:
-        st.warning("⚠️ APIキーが設定されていないため、AIとの壁打ちチャット機能は無効化されています。サイドバーから設定してください。")
+        st.info("APIキーを設定すると、AIによる構造分析と壁打ちが可能になります。")
